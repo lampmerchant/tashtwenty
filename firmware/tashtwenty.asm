@@ -80,6 +80,9 @@ TXNOTRC	equ	7	;Set if a transmit is ongoing, clear if a receive is
 
 M_FAIL	equ	7	;Set when there's been a failure on the MMC interface
 M_CMDLR	equ	6	;Set when R3 or R7 is expected (5 bytes), not R1
+M_CMDRB	equ	5	;Set when an R1b is expected (busy signal after reply)
+M_MBRD	equ	4	;Set when a multiblock read is in progress
+M_MBWR	equ	3	;Set when a multiblock write is in progress
 
 
 ;;; Variable Storage ;;;
@@ -511,6 +514,7 @@ GetCommand
 CmdUnknown
 	movf	RC_CMDN,W	;Save the unknown command's number since it's
 	movwf	TEMP2		; about to be overwritten
+	;TODO log unknown commands and expected response lengths somehow
 	call	ClearResponse	;Clear the buffer according to expectations
 	movf	TEMP2,W		;Our reply is going to be the command number
 	movwf	TX_CMDN		; with its MSB set, by convention, but data
@@ -539,6 +543,7 @@ NakCommand
 	goto	IdleJump	;Done
 
 CmdRead
+	call	MmcStopOngoing	;Stop any multiblock read or write
 	clrf	M_BUF5		;Shift the block address left by 9 (multiply it
 	lslf	RC_ADRL,W	; by 512) to transform it into the byte address
 	movwf	M_BUF4		; used by the MMC card
@@ -560,8 +565,10 @@ CmdRea0	movlw	0x02		;Increment the read address by 512 - we do this
 	movlw	0		; sector on the MMC card is the controller
 	addwfc	M_BUF3,F	; status block, conveniently
 	addwfc	M_BUF2,F	; "
-	movlw	0x51		;Set up a read command for the MMC card
-	movwf	M_BUF1		; "
+	movlw	0x51		;Set up a read command for the MMC card (R1-
+	movwf	M_BUF1		; type response)
+	bcf	M_FLAGS,M_CMDLR	; "
+	bcf	M_FLAGS,M_CMDRB	; "
 	bcf	PORTC,RC3	;Assert !CS
 	btfss	M_FLAGS,M_FAIL	;If there haven't been any previous failures,
 	call	MmcCmd		; send the MMC command
@@ -592,6 +599,7 @@ CmdRea0	movlw	0x02		;Increment the read address by 512 - we do this
 	goto	IdleJump	; do, so call it done
 
 CmdWrite
+	call	MmcStopOngoing	;Stop any multiblock read or write
 	clrf	M_BUF5		;Shift the block address left by 9 (multiply it
 	lslf	RC_ADRL,W	; by 512) to transform it into the byte address
 	movwf	M_BUF4		; used by the MMC card
@@ -604,19 +612,26 @@ CmdWrite
 	movlw	0		; sector on the MMC card is the controller
 	addwfc	M_BUF3,F	; status block
 	addwfc	M_BUF2,F	; "
-CmdWriteCont
-	movlw	0x58		;Set up a write command for the MMC card, maybe
-	movwf	M_BUF1		; with an address set up by a previous command
+	movlw	0x59		;Set up a write command for the MMC card (R1-
+	movwf	M_BUF1		; type reply)
+	bcf	M_FLAGS,M_CMDLR	; "
+	bcf	M_FLAGS,M_CMDRB	; "
+	bsf	M_FLAGS,M_MBWR	;Set the flag for an ongoing multiblock write
 	bcf	PORTC,RC3	;Assert !CS
 	btfss	M_FLAGS,M_FAIL	;If there haven't been any previous failures,
 	call	MmcCmd		; send the MMC command
+CmdWriteCont
+	btfss	M_FLAGS,M_MBWR	;If for some reason we got here without there
+	bra	NakCommand	; being a multiblock write going on, NAK
 	movlw	0x20		;Point FSR0 past the sync, length, header, and
 	movwf	FSR0H		; tag bytes, and to the data we'll be writing
 	movlw	0x1D		; "
 	movwf	FSR0L		; "
 	btfss	M_FLAGS,M_FAIL	;If the operation didn't fail, write data to
 	call	MmcWriteData	; the MMC card
-	bsf	PORTC,RC3	;Deassert !CS
+	decf	RC_BLKS,W	;If the blocks-remaining counter is at one,
+	btfsc	STATUS,Z	; stop the multiblock write here before sending
+	call	MmcStopOngoing	; our response to the mac
 	movf	RC_BLKS,W	;Move the block count from receiver position to
 	movwf	TX_BLKS		; transmitter position
 	movlw	0x81		;Command number is the write command with the
@@ -636,20 +651,18 @@ CmdWriteCont
 	movlp	high Transmit	;Initiate transmission
 	call	Transmit	; "
 	movlp	0		; "
-	movlw	0x02		;Increment the read address by 512 in case more
-	addwf	M_BUF4,F	; blocks are to come (with command number 0x41)
-	movlw	0		; because its handler is this one, just jumped
-	addwfc	M_BUF3,F	; into a bit late
-	addwfc	M_BUF2,F	; "
 	goto	IdleJump	;Done
 
 CmdStatus
+	call	MmcStopOngoing	;Stop any multiblock read or write
 	clrf	M_BUF5		;Set the address to read the first sector of
 	clrf	M_BUF4		; the MMC card
 	clrf	M_BUF3		; "
 	clrf	M_BUF2		; "
-	movlw	0x51		;Set up a read command for the MMC card
-	movwf	M_BUF1		; "
+	movlw	0x51		;Set up a read command for the MMC card (R1-
+	movwf	M_BUF1		; type reply)
+	bcf	M_FLAGS,M_CMDLR	; "
+	bcf	M_FLAGS,M_CMDRB	; "
 	movlw	0x83		;Command number is the status command with the
 	movwf	TX_CMDN		; MSB set
 	clrf	TX_BLKS		;Block count is a pad byte in status command
@@ -780,6 +793,7 @@ ClearR0	movwi	FSR0++		;Write seven zeroes to the buffer
 
 ;Initialize MMC card.  Sets M_FAIL on fail.  Trashes TEMP.
 MmcInit
+	clrf	M_FLAGS		;Make sure flags are all clear to begin with
 	movlb	4		;This is where all the SSP registers are
 	movlw	10		;Send 80 clocks on SPI interface to ensure MMC
 	movwf	TEMP		; card is started up and in native command mode
@@ -800,6 +814,7 @@ MmcIni0	movlw	0xFF		; "
 	movlw	0x95		; "
 	movwf	M_BUF6		; "
 	bcf	M_FLAGS,M_CMDLR	; "
+	bcf	M_FLAGS,M_CMDRB	; "
 	call	MmcCmd		; "
 	btfsc	M_FLAGS,M_FAIL	;If this command failed, unrecognized or
 	return			; missing MMC card, fail the init operation
@@ -817,6 +832,7 @@ MmcIni1	movlw	0x41		;Send command 1 (expect R1-type response),
 	clrf	M_BUF5		; "
 	clrf	M_BUF6		; "
 	bcf	M_FLAGS,M_CMDLR	; "
+	bcf	M_FLAGS,M_CMDRB	; "
 	call	MmcCmd		; "
 	btfsc	M_FLAGS,M_FAIL	;If this command failed, unrecognized MMC card,
 	return			; fail the init operation
@@ -837,6 +853,7 @@ MmcIni2	movlw	0x50		;Send command 16 (expect R1-type response) to
 	clrf	M_BUF5		; "
 	clrf	M_BUF6		; "
 	bcf	M_FLAGS,M_CMDLR	; "
+	bcf	M_FLAGS,M_CMDRB	; "
 	call	MmcCmd		; "
 	btfsc	M_FLAGS,M_FAIL	;If this command failed, something is wrong,
 	return			; fail the init operation
@@ -892,16 +909,18 @@ MmcRea3	movlw	0xFF		;Clock the next data byte out of the MMC card
 	return
 
 ;Write 512 bytes of data to MMC card from buffer pointed to by FSR0.  Sets
-; M_FAIL on fail. Trashes TEMP and FSR0.
+; M_FAIL on fail. Trashes TEMP, TEMP2, and FSR0.
 MmcWriteData
 	movlb	4		;Switch to the bank with the SSP registers
 	movlw	0xFF		;Clock a dummy byte while keeping MOSI high
 	movwf	SSP1BUF		; "
 	btfss	SSP1STAT,BF	; "
 	bra	$-1		; "
-	movlw	0xFE		;Clock the data token into the MMC card
-	movwf	SSP1BUF		; "
-	btfss	SSP1STAT,BF	; "
+	movlw	0xFE		;Clock the data token into the MMC card (note
+	btfsc	M_FLAGS,M_MBWR	; that CMD25, multi-block write, requires a
+	movlw	0xFC		; different token than CMD24, single-block
+	movwf	SSP1BUF		; write, so we differentiate based on the flag
+	btfss	SSP1STAT,BF	; for ongoing multi-block write)
 	bra	$-1		; "
 	clrf	TEMP		;Send 256 pairs of bytes
 MmcWri0	moviw	FSR0++		;Clock the next data byte into the MMC card
@@ -928,22 +947,46 @@ MmcWri0	moviw	FSR0++		;Clock the next data byte into the MMC card
 	andlw	B'00011111'	; was rejected for any reason, fail the write
 	xorlw	B'00000101'	; operation
 	btfss	STATUS,Z	; "
-	bra	MmcWri2		; "
-	clrf	TEMP		;Check 65536 times to see if the write is done
-	clrf	TEMP2		; "
-MmcWri1	movlw	0xFF		;Clock a byte out of the MMC card while keeping
-	movwf	SSP1BUF		; MOSI high
+	bsf	M_FLAGS,M_FAIL	; "
+	btfss	M_FLAGS,M_FAIL	;If we didn't fail, wait for the card not to be
+	call	MmcWaitBusy	; busy anymore
+	movlb	0		;Return to the default bank
+	return
+
+;Stop a multiblock read or write, if one is ongoing, and deassert !CS.  Sets
+; M_FAIL on fail.  Trashes TEMP and TEMP2.
+MmcStopOngoing
+	btfsc	M_FLAGS,M_FAIL	;If there's a fail on the MMC card, return
+	return			; immediately
+	btfsc	M_FLAGS,M_MBWR	;If there's an ongoing write operation, make it
+	bra	MmcSto0		; stop
+	btfss	M_FLAGS,M_MBRD	;If there's not an ongoing read operation, this
+	return			; function was called needlessly, return
+	movlw	0x4C		;Send a CMD12 to stop the ongoing read, R1b
+	movwf	M_BUF1		; reply type
+	clrf	M_BUF2		; "
+	clrf	M_BUF3		; "
+	clrf	M_BUF4		; "
+	clrf	M_BUF5		; "
+	bcf	M_FLAGS,M_CMDLR	; "
+	bsf	M_FLAGS,M_CMDRB	; "
+	call	MmcCmd		; "
+	bcf	M_FLAGS,M_MBRD	;Clear the ongoing multiblock read flag
+	bsf	PORTC,RC3	;Deassert !CS
+	return
+MmcSto0	movlb	4		;Switch to the bank with the SSP registers
+	movlw	0xFD		;Clock the end-of-data token into the MMC card
+	movwf	SSP1BUF		; "
 	btfss	SSP1STAT,BF	; "
 	bra	$-1		; "
-	movf	SSP1BUF,W	;Check if MISO is still low, if it's not, the
-	btfss	STATUS,Z	; write is done and we can return
-	bra	MmcWri3		; "
-	decfsz	TEMP,F		;If it's not done, try again
-	bra	MmcWri1		; "
-	decfsz	TEMP2,F		; "
-	bra	MmcWri1		; "
-MmcWri2	bsf	M_FLAGS,M_FAIL	;If out of tries, fail the write operation
-MmcWri3	movlb	0		;Return to the default bank
+	movlw	0xFF		;Clock a dummy byte while keeping MOSI high
+	movwf	SSP1BUF		; "
+	btfss	SSP1STAT,BF	; "
+	bra	$-1		; "
+	call	MmcWaitBusy	;Wait for the card to not be busy anymore
+	movlb	0		;Return to the default bank
+	bcf	M_FLAGS,M_MBWR	;Clear the ongoing multiblock write flag
+	bsf	PORTC,RC3	;Deassert !CS
 	return
 
 ;Send the command contained in M_BUF1-6 to MMC card.  Sets M_FAIL on fail.
@@ -1017,9 +1060,28 @@ MmcCmd2	decf	WREG,W		;Store the byte we received as R1-type status
 	bra	$-1		; "
 	movf	SSP1BUF,W	; "
 	movwf	M_BUF5		; "
-MmcCmd3	;TODO microchip's code sends another 8 clocks here but I can't find
-	; anything in the spec that says we have to do that
-	movlb	0
+MmcCmd3	btfsc	M_FLAGS,M_CMDRB	;If we're expecting an R1b reply, wait for the
+	call	MmcWaitBusy	; card not to be busy anymore before returning
+	movlb	0		;Restore BSR to 0
+	return
+
+;Waits for the card not to be busy anymore.  Sets M_FAIL on fail.  Trashes TEMP
+; and TEMP2.  Expects BSR to be 4 and does not set or reset this.
+MmcWaitBusy
+	clrf	TEMP		;Check 65536 times to see if the card is busy
+	clrf	TEMP2		; "
+MmcWai0	movlw	0xFF		;Clock a byte out of the MMC card while keeping
+	movwf	SSP1BUF		; MOSI high
+	btfss	SSP1STAT,BF	; "
+	bra	$-1		; "
+	movf	SSP1BUF,W	;Check if MISO is still low, if it's not, the
+	btfss	STATUS,Z	; card is no longer busy and we can return
+	return			; "
+	decfsz	TEMP,F		;If it's not done, try again
+	bra	MmcWai0		; "
+	decfsz	TEMP2,F		; "
+	bra	MmcWai0		; "
+	bsf	M_FLAGS,M_FAIL	;If out of tries, fail the operation
 	return
 
 
