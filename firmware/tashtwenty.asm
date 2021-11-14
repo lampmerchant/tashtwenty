@@ -76,7 +76,7 @@ DNOP	macro
 
 ;;; Constants ;;;
 
-TXNOTRC	equ	7	;Set if a transmit is ongoing, clear if a receive is
+ABORTED	equ	7	;Set if a transmit or receive operation was aborted
 
 M_FAIL	equ	7	;Set when there's been a failure on the MMC interface
 M_CMDLR	equ	6	;Set when R3 or R7 is expected (5 bytes), not R1
@@ -91,18 +91,18 @@ M_MBWR	equ	3	;Set when a multiblock write is in progress
 	
 	FLAGS	;You've got to have flags
 	GROUPS	;Count of groups to transmit, count of groups received
+	CRC16H	;High byte of the CRC16 register
+	CRC16L	;Low byte of the CRC16 register
 	M_FLAGS	;MMC flags
 	M_BUF1	;The command to be sent, later the R1 response byte	
 	M_BUF2	;First (high) byte of the address, first byte of R3/R7 response
 	M_BUF3	;Second byte of the address, second byte of R3/R7 response
 	M_BUF4	;Third byte of the address, third byte of R3/R7 response
 	M_BUF5	;Fourth (low) byte of the address, last byte of R3/R7 response
-	M_BUF6	;CRC byte of the command to be sent
+	M_CRC	;CRC byte of the command to be sent
 	TEMP	;Various purposes
 	TEMP2	;Various purposes
 	TEMP3	;Various purposes
-	D3
-	D2
 	D1
 	D0
 	
@@ -150,22 +150,22 @@ Interrupt
 	lslf	PORTA,W		;32 entries in the jump table, each has four
 	brw			; instructions; jump to the one matching state
 	
-IntEn0	bra	IntSuspend	;Mac wants to suspend communication and is
-	nop			; waiting for us to drive RD high to deassert
-	nop			; !HSHK; handle it
-	nop			; "
+IntEn0	movlb	7		;This is the suspend state, so we should never
+	clrf	IOCAF		; get here unless it's a blip on one of the
+	retfie			; state lines - if it is, clear and return and
+	nop			; just hope timing isn't too badly wrecked
 IntEn1	movlb	7		;This is the communication state, so we should
 	clrf	IOCAF		; never get here unless it's a blip on one of
 	retfie			; the state lines - if it is, clear and return
 	nop			; and just hope timing isn't too badly wrecked
-IntEn2	bsf	PORTC,RC4	;This state (idle) is two states away from the
-	bra	IntAbort	; communication state, which is strange, but
-	nop			; assume that it means mac wants to abort the
+IntEn2	bsf	PORTC,RC4	;Being in state 2 (idle) without first going to
+	bra	IntAbort	; state 3 means mac wants to abort the
 	nop			; operation in progress
-IntEn3	btfss	FLAGS,TXNOTRC	;In a receive, this means mac is done and is
-	bra	IntDoneReceive	; waiting !HSHK to be deasserted; normally
-	bra	IntAbort	; transmit will handle this state in mainline,
-	nop			; so if we're here it's bad, treat as an abort
+	nop			; "
+IntEn3	bra	IntDoneReceive	;This means mac is done and is waiting for
+	nop			; !HSHK to be deasserted
+	nop			; "
+	nop			; "
 IntEn4	bsf	PORTC,RC4	;This state (reset) is two states away from the
 	bra	IntAbort	; communication state, which is strange, but
 	nop			; assume that it means mac wants to abort the
@@ -279,45 +279,9 @@ IntNEn	bsf	PORTC,RC4	;Now this is really REALLY weird; why would mac
 	nop			; Whatever, drive RD high and force an
 	nop			; unexplained return to the idle state
 
-IntSuspend
-	movlp	high DecodeRecv	;If we were interrupted doing a receive, decode
-	btfss	FLAGS,TXNOTRC	; the data we've received so far
-	call	DecodeRecv	; "
-	bsf	PORTC,RC4	;Signal that we acknowledge the suspension
-IntSTr1	movf	PORTA,W		;Check the current state
-	btfsc	STATUS,Z	;If it's 0 (holdoff), mac is still asking us to
-	bra	IntSTr1		; hold off, so loop again
-	xorlw	B'00000100'	;If it's 2 (idle), mac wants to abort the
-	btfsc	STATUS,Z	; command in progress
-	bra	IntAbort	; "
-	xorlw	B'00000110'	;If it's 1 (communication), mac is probably
-	btfsc	STATUS,Z	; moving through it to state 3 (request send)
-	bra	IntSTr1		; so loop until it gets there
-	xorlw	B'00000100'	;If it's anything else but 3 (request send),
-	btfss	STATUS,Z	; something weird's going on so abort
-	bra	IntAbort	; "
-	bcf	PORTC,RC4	;Signal that we're ready to resume
-IntSTr2	movf	PORTA,W		;Check the current state
-	xorlw	B'00000110'	;If it's still 3 (request send), mac hasn't
-	btfsc	STATUS,Z	; acknowledged that we're ready yet, so loop
-	bra	IntSTr2		; again
-	xorlw	B'00000100'	;If it's anything else but 1 (communication),
-	btfss	STATUS,Z	; something weird's going on, so abort
-	bra	IntAbort	; "
-	movlb	7		;Clear the interrupt that got us here and any
-	clrf	IOCAF		; we received after that
-	movlb	31		;Don't return to where we left off in the
-	movlw	high Transmitter; transmitter or receiver loop, return to the
-	btfss	FLAGS,TXNOTRC	; beginning of it; note that both transmitter
-	movlw	high Receiver	; and receiver will take care of setting BSR
-	movwf	TOSH		; and enabling interrupts - we use return here
-	movlw	low Transmitter	; instead of retfie so that the FSRs don't get
-	btfss	FLAGS,TXNOTRC	; overwritten
-	movlw	low Receiver	; "
-	movwf	TOSL		; "
-	return
-
 IntDoneReceive
+	movlp	high RecvDecode	;Decode the data we've received
+	call	RecvDecode	; "
 	bsf	PORTC,RC4	;Deassert !HSHK to acknowledge receive is done
 IntDRc0	movf	PORTA,W		;Check the current state
 	xorlw	B'00000110'	;If it's still 3, mac hasn't acknowledged our
@@ -326,13 +290,12 @@ IntDRc0	movf	PORTA,W		;Check the current state
 	xorlw	B'00000010'	;If it's anything else but 2 (idle), something
 	btfss	STATUS,Z	; weird's going on, so abort
 	bra	IntAbort	; "
-	movlp	high DecodeRecv	;Decode the data we've received since the start
-	call	DecodeRecv	; or since the last interruption
 	movlb	7		;Clear the interrupt that got us here and any
 	clrf	IOCAF		; we received after that
 	movlb	31		;Swallow the interrupt return address and
 	decf	STKPTR,F	; instead return to who called receiver
 	movlb	0		; without reenabling interrupts
+	movlp	0		;Reset PCLATH to where we're returning
 	return			; "
 
 IntAbort
@@ -340,12 +303,10 @@ IntAbort
 	clrf	IOCAF		; we received after that
 	movlb	31		;Swallow the return address where the PC was
 	decf	STKPTR,F	; when the interrupt happened
-	movlw	high IdleJump	;Overwrite the return address from which
-	movwf	TOSH		; receiver or transmitter was called with the
-	movlw	low IdleJump	; address of the idle jump table so that a
-	movwf	TOSL		; return from interrupt dumps us back there
-	movlb	0		; to handle the current state
-	return			;Return to idle without reenabling interrupts
+	movlb	0		; "
+	bsf	FLAGS,ABORTED	;Raise the aborted flag
+	movlp	0		;Reset PCLATH to where we're returning
+	return			;Return to caller without reenabling interrupts
 
 
 ;;; Init ;;;
@@ -355,9 +316,9 @@ Init
 	movlw	B'11110000'
 	movwf	OSCCON
 
-	banksel	IOCAP		;When interrupts are on, any change on !ENBL or
-	movlw	B'00111110'	; the phase pins triggers one
-	movwf	IOCAP
+	banksel	IOCAP		;When interrupts are on, any change on !ENBL,
+	movlw	B'00111100'	; PH3, PH2, or PH1 triggers one; this is what
+	movwf	IOCAP		; gets us out of the endless receive loop
 	movwf	IOCAN
 
 	banksel	SSPCON1		;SSP SPI master mode, clock set by baud rate
@@ -405,6 +366,7 @@ DelayMs	DELAY	242		; has been done
 	movlw	B'00100001'	; of the SPI interface up to 2 MHz
 	movwf	SSPCON1		; "
 	movlb	0		; "
+	;fall through
 
 
 ;;; Mainline Code ;;;
@@ -493,7 +455,8 @@ IdleNEn	bra	WaitEnbl	;!ENBL has been deasserted, so get off the bus
 GetCommand
 	movlp	high Receive	;Initiate receive
 	call	Receive		; "
-	movlp	0		; "
+	btfsc	FLAGS,ABORTED	;If it was aborted, return to idle loop
+	goto	IdleJump	; "
 	call	CheckChecksum	;Calculate the checksum of the received block
 	btfss	STATUS,Z	;If the checksum was bad, send a NAK
 	bra	NakCommand	; "
@@ -520,9 +483,8 @@ CmdUnknown
 	movwf	TX_CMDN		; with its MSB set, by convention, but data
 	bsf	TX_CMDN,7	; will be all zeroes
 	call	CalcChecksum	;Calculate the checksum of this placeholder
-	movlp	high Transmit	;Initiate transmission
-	call	Transmit	; "
-	movlp	0		; "
+	movlp	high Transmit	;Initiate transmission; if it's aborted, we
+	call	Transmit	; don't actually do anything differently
 	goto	IdleJump	;Done, hope the host doesn't mind
 
 NakCommand
@@ -537,9 +499,11 @@ NakCommand
 	clrf	TX_PAD3		; "
 	movlw	0x81		;We know what the checksum will be, so just
 	movwf	TX_CSUM		; hardcode it
-	movlp	high Transmit	;Initiate transmission
-	call	Transmit	; "
-	movlp	0		; "
+	movlw	0x20		;Point FSR0 at the top of linear memory, where
+	movwf	FSR0H		; we want transmission to start from
+	clrf	FSR0L		; "
+	movlp	high Transmit	;Initiate transmission; if it's aborted, we
+	call	Transmit	; don't actually do anything differently
 	goto	IdleJump	;Done
 
 CmdRead
@@ -593,7 +557,8 @@ CmdRea0	movlw	0x02		;Increment the read address by 512 - we do this
 	call	CalcChecksum	;Calculate the checksum on our response
 	movlp	high Transmit	;Initiate transmission
 	call	Transmit	; "
-	movlp	0		; "
+	btfsc	FLAGS,ABORTED	;If the command was aborted, return to idle
+	goto	IdleJump	; loop
 	decfsz	TX_BLKS,F	;Decrement the block count; if it hits zero,
 	bra	CmdRea0		; that's all the reading we were requested to
 	goto	IdleJump	; do, so call it done
@@ -648,9 +613,8 @@ CmdWriteCont
 	movlw	1		;Success or failure, we're transmitting one
 	movwf	GROUPS		; group in response
 	call	CalcChecksum	;Calculate the checksum on our response
-	movlp	high Transmit	;Initiate transmission
-	call	Transmit	; "
-	movlp	0		; "
+	movlp	high Transmit	;Initiate transmission; if it's aborted, we
+	call	Transmit	; don't actually do anything differently
 	goto	IdleJump	;Done
 
 CmdStatus
@@ -692,9 +656,8 @@ CmdStatus
 	movlw	1		; was a failure, in which case set it to 1 to
 	movwf	GROUPS		; carry the bad status back to mac
 	call	CalcChecksum	;Calculate the checksum on our response
-	movlp	high Transmit	;Initiate transmission
-	call	Transmit	; "
-	movlp	0		; "
+	movlp	high Transmit	;Initiate transmission; if it's aborted, we
+	call	Transmit	; don't actually do anything differently
 	goto	IdleJump	;Done
 
 
@@ -811,8 +774,6 @@ MmcIni0	movlw	0xFF		; "
 	clrf	M_BUF3		; "
 	clrf	M_BUF4		; "
 	clrf	M_BUF5		; "
-	movlw	0x95		; "
-	movwf	M_BUF6		; "
 	bcf	M_FLAGS,M_CMDLR	; "
 	bcf	M_FLAGS,M_CMDRB	; "
 	call	MmcCmd		; "
@@ -830,7 +791,6 @@ MmcIni1	movlw	0x41		;Send command 1 (expect R1-type response),
 	clrf	M_BUF3		; "
 	clrf	M_BUF4		; "
 	clrf	M_BUF5		; "
-	clrf	M_BUF6		; "
 	bcf	M_FLAGS,M_CMDLR	; "
 	bcf	M_FLAGS,M_CMDRB	; "
 	call	MmcCmd		; "
@@ -851,7 +811,21 @@ MmcIni2	movlw	0x50		;Send command 16 (expect R1-type response) to
 	movlw	0x02		; "
 	movwf	M_BUF4		; "
 	clrf	M_BUF5		; "
-	clrf	M_BUF6		; "
+	bcf	M_FLAGS,M_CMDLR	; "
+	bcf	M_FLAGS,M_CMDRB	; "
+	call	MmcCmd		; "
+	btfsc	M_FLAGS,M_FAIL	;If this command failed, something is wrong,
+	return			; fail the init operation
+	movf	M_BUF1,W	;If this command returned any response other
+	btfss	STATUS,Z	; than 0x00, something is wrong, fail the init
+	bsf	M_FLAGS,M_FAIL	; operation
+	movlw	0x7B		;Send command 59 (expect R1-type response) to
+	movwf	M_BUF1		; tell the card we want to make life hard on
+	clrf	M_BUF2		; ourselves and have our CRCs checked by the
+	clrf	M_BUF3		; card
+	clrf	M_BUF4		; "
+	movlw	0x01		; "
+	movwf	M_BUF5		; "
 	bcf	M_FLAGS,M_CMDLR	; "
 	bcf	M_FLAGS,M_CMDRB	; "
 	call	MmcCmd		; "
@@ -912,6 +886,8 @@ MmcRea3	movlw	0xFF		;Clock the next data byte out of the MMC card
 ; M_FAIL on fail. Trashes TEMP, TEMP2, and FSR0.
 MmcWriteData
 	movlb	4		;Switch to the bank with the SSP registers
+	clrf	CRC16H		;Start CRC16 registers at zero
+	clrf	CRC16L		; "
 	movlw	0xFF		;Clock a dummy byte while keeping MOSI high
 	movwf	SSP1BUF		; "
 	btfss	SSP1STAT,BF	; "
@@ -925,18 +901,43 @@ MmcWriteData
 	clrf	TEMP		;Send 256 pairs of bytes
 MmcWri0	moviw	FSR0++		;Clock the next data byte into the MMC card
 	movwf	SSP1BUF		; "
-	btfss	SSP1STAT,BF	; "
+	xorwf	CRC16H,W	;Update the CRC while the byte is transmitting
+	movwf	CRC16H		; "
+	movlp	high LutCrc16H	; "
+	callw			; "
+	xorwf	CRC16L,W	; "
+	xorwf	CRC16H,F	; "
+	xorwf	CRC16H,W	; "
+	xorwf	CRC16H,F	; "
+	movlp	high LutCrc16L	; "
+	callw			; "
+	movwf	CRC16L		; "
+	btfss	SSP1STAT,BF	;Wait until the byte is done transmitting
 	bra	$-1		; "
 	moviw	FSR0++		;Clock the next data byte into the MMC card
 	movwf	SSP1BUF		; "
-	btfss	SSP1STAT,BF	; "
+	xorwf	CRC16H,W	;Update the CRC while the byte is transmitting
+	movwf	CRC16H		; "
+	movlp	high LutCrc16H	; "
+	callw			; "
+	xorwf	CRC16L,W	; "
+	xorwf	CRC16H,F	; "
+	xorwf	CRC16H,W	; "
+	xorwf	CRC16H,F	; "
+	movlp	high LutCrc16L	; "
+	callw			; "
+	movwf	CRC16L		; "
+	btfss	SSP1STAT,BF	;Wait until the byte is done transmitting
 	bra	$-1		; "
 	decfsz	TEMP,F		;Decrement the counter and go back to write the
 	bra	MmcWri0		; next byte pair, unless we're done
-	clrf	SSP1BUF		;Clock a blank CRC byte into the MMC card
+	movlp	0		;Restore PCLATH from all the CRC calculating
+	movf	CRC16H,W	;Clock the high CRC byte into the MMC card
+	movwf	SSP1BUF		; "
 	btfss	SSP1STAT,BF	; "
 	bra	$-1		; "
-	clrf	SSP1BUF		;Clock a blank CRC byte into the MMC card
+	movf	CRC16L,W	;Clock the low CRC byte into the MMC card
+	movwf	SSP1BUF		; "
 	btfss	SSP1STAT,BF	; "
 	bra	$-1		; "
 	movlw	0xFF		;Clock data response byte out of the MMC card
@@ -993,28 +994,47 @@ MmcSto0	movlb	4		;Switch to the bank with the SSP registers
 ; Trashes TEMP.
 MmcCmd
 	bcf	M_FLAGS,M_FAIL	;Start out optimistic and say this didn't fail
+	clrf	M_CRC		;Start the CRC7 register out at 0
+	movlp	high LutCrc7	;Point PCLATH to the CRC7 lookup table
 	movlb	4		;Switch to the bank with the SSP registers
-	movf	M_BUF1,W	;Clock out all six MMC buffer bytes as command
-	movwf	SSP1BUF		; "
+	movf	M_BUF1,W	;Clock out all six MMC buffer bytes as command,
+	movwf	SSP1BUF		; calculating the CRC7 along the way
+	xorwf	M_CRC,W		; "
+	callw			; "
+	movwf	M_CRC		; "
 	btfss	SSP1STAT,BF	; "
 	bra	$-1		; "
 	movf	M_BUF2,W	; "
 	movwf	SSP1BUF		; "
+	xorwf	M_CRC,W		; "
+	callw			; "
+	movwf	M_CRC		; "
 	btfss	SSP1STAT,BF	; "
 	bra	$-1		; "
 	movf	M_BUF3,W	; "
 	movwf	SSP1BUF		; "
+	xorwf	M_CRC,W		; "
+	callw			; "
+	movwf	M_CRC		; "
 	btfss	SSP1STAT,BF	; "
 	bra	$-1		; "
 	movf	M_BUF4,W	; "
 	movwf	SSP1BUF		; "
+	xorwf	M_CRC,W		; "
+	callw			; "
+	movwf	M_CRC		; "
 	btfss	SSP1STAT,BF	; "
 	bra	$-1		; "
 	movf	M_BUF5,W	; "
 	movwf	SSP1BUF		; "
+	xorwf	M_CRC,W		; "
+	callw			; "
+	movlp	0		; "
+	movwf	M_CRC		; "
+	bsf	M_CRC,0		; "
 	btfss	SSP1STAT,BF	; "
 	bra	$-1		; "
-	movf	M_BUF6,W	; "
+	movf	M_CRC,W		; "
 	movwf	SSP1BUF		; "
 	btfss	SSP1STAT,BF	; "
 	bra	$-1		; "
@@ -1085,114 +1105,805 @@ MmcWai0	movlw	0xFF		;Clock a byte out of the MMC card while keeping
 	return
 
 
-;;; Interrupt Subprograms ;;;
+;;; CRC Lookup Tables ;;;
 
-;In receive mode, interrupt handler calls this code to decode 7-to-8 bytes
-DecodeRecv
-	movf	FSR1H,W		;If FSR1 == 0x2000, this is the first received
-	andlw	B'00011111'	; stream and must be handled differently so the
-	iorwf	FSR1L,W		; first 3 bytes from the IWM are preserved
-	btfss	STATUS,Z	; "
-	bra	Decode1		; "
-	moviw	FSR0--		;If this was the first received stream, reckon
-	moviw	FSR0--		; the group count as (FSR0-3)//8 and position
-	moviw	FSR0--		; both pointers right after the initial 3 bytes
-	lsrf	FSR0H,F		; received from the IWM (the sync byte, the
-	rrf	FSR0L,F		; length of the message plus 0x81, and the
-	lsrf	FSR0H,F		; expected length of the response plus 0x81)
-	rrf	FSR0L,F		; "
-	lsrf	FSR0H,F		; "
-	rrf	FSR0L,W		; "
-	movwf	TEMP2		; "
-	movlw	0x20		; "
-	movwf	FSR0H		; "
-	movwf	FSR1H		; "
-	movlw	0x03		; "
-	movwf	FSR0L		; "
-	movwf	FSR1L		; "
-	bra	Decode2		; "
-Decode1	moviw	FSR0--		;If this was not the first received stream,
-	movf	FSR1L,W		; reckon the group count as (FSR0-FSR1-1)//8
-	subwf	FSR0L,W		; and position FSR0 one byte ahead of FSR1 so
-	movwf	TEMP2		; that the repeated sync byte is overwritten
-	movf	FSR1H,W		; "
-	subwfb	FSR0H,W		; "
-	lsrf	WREG,W		; "
-	rrf	TEMP2,F		; "
-	lsrf	WREG,W		; "
-	rrf	TEMP2,F		; "
-	lsrf	WREG,W		; "
-	rrf	TEMP2,F		; "
-	movf	FSR1H,W		; "
-	movwf	FSR0H		; "
-	movf	FSR1L,W		; "
-	movwf	FSR0L		; "
-	moviw	FSR0++		; "
-Decode2	movf	TEMP2,W		;Add the count of groups received in this
-	addwf	GROUPS,F	; stream to the total groups received count
-	movf	TEMP2,F		;If the group count is 0, don't do the next
-	btfsc	STATUS,Z	; loop at all
-	bra	Decode4		; "
-Decode3	moviw	FSR0++		;Pick up the byte with the LSBs of the next 
-	movwf	TEMP		; seven
-	lsrf	TEMP,F		;Rotate the LSB of the first byte of the group
-	rlf	INDF0,W		; into place
-	movwi	FSR1++		;Write the restored byte to memory
-	moviw	FSR0++		;Advance the input pointer
-	lsrf	TEMP,F		;Rotate the LSB of the second byte of the group
-	rlf	INDF0,W		; into place
-	movwi	FSR1++		;Write the restored byte to memory
-	moviw	FSR0++		;Advance the input pointer
-	lsrf	TEMP,F		;Rotate the LSB of the third byte of the group
-	rlf	INDF0,W		; into place
-	movwi	FSR1++		;Write the restored byte to memory
-	moviw	FSR0++		;Advance the input pointer
-	lsrf	TEMP,F		;Rotate the LSB of the fourth byte of the group
-	rlf	INDF0,W		; into place
-	movwi	FSR1++		;Write the restored byte to memory
-	moviw	FSR0++		;Advance the input pointer
-	lsrf	TEMP,F		;Rotate the LSB of the fifth byte of the group
-	rlf	INDF0,W		; into place
-	movwi	FSR1++		;Write the restored byte to memory
-	moviw	FSR0++		;Advance the input pointer
-	lsrf	TEMP,F		;Rotate the LSB of the sixth byte of the group
-	rlf	INDF0,W		; into place
-	movwi	FSR1++		;Write the restored byte to memory
-	moviw	FSR0++		;Advance the input pointer
-	lsrf	TEMP,F		;Rotate the LSB of the last byte of the group
-	rlf	INDF0,W		; into place
-	movwi	FSR1++		;Write the restored byte to memory
-	moviw	FSR0++		;Advance the input pointer
-	decfsz	TEMP2,F		;Decrement the group count and loop if it's not
-	bra	Decode3		; yet zero
-Decode4	movf	FSR1H,W		;FSR1 now points to one past the end of final
-	movwf	FSR0H		; data, copy it to FSR0 so future received data
-	movf	FSR1L,W		; is written there too
-	movwf	FSR0L		; "
-	return
+	org	0x800
+
+LutCrc7
+	retlw	0x00
+	retlw	0x12
+	retlw	0x24
+	retlw	0x36
+	retlw	0x48
+	retlw	0x5A
+	retlw	0x6C
+	retlw	0x7E
+	retlw	0x90
+	retlw	0x82
+	retlw	0xB4
+	retlw	0xA6
+	retlw	0xD8
+	retlw	0xCA
+	retlw	0xFC
+	retlw	0xEE
+	retlw	0x32
+	retlw	0x20
+	retlw	0x16
+	retlw	0x04
+	retlw	0x7A
+	retlw	0x68
+	retlw	0x5E
+	retlw	0x4C
+	retlw	0xA2
+	retlw	0xB0
+	retlw	0x86
+	retlw	0x94
+	retlw	0xEA
+	retlw	0xF8
+	retlw	0xCE
+	retlw	0xDC
+	retlw	0x64
+	retlw	0x76
+	retlw	0x40
+	retlw	0x52
+	retlw	0x2C
+	retlw	0x3E
+	retlw	0x08
+	retlw	0x1A
+	retlw	0xF4
+	retlw	0xE6
+	retlw	0xD0
+	retlw	0xC2
+	retlw	0xBC
+	retlw	0xAE
+	retlw	0x98
+	retlw	0x8A
+	retlw	0x56
+	retlw	0x44
+	retlw	0x72
+	retlw	0x60
+	retlw	0x1E
+	retlw	0x0C
+	retlw	0x3A
+	retlw	0x28
+	retlw	0xC6
+	retlw	0xD4
+	retlw	0xE2
+	retlw	0xF0
+	retlw	0x8E
+	retlw	0x9C
+	retlw	0xAA
+	retlw	0xB8
+	retlw	0xC8
+	retlw	0xDA
+	retlw	0xEC
+	retlw	0xFE
+	retlw	0x80
+	retlw	0x92
+	retlw	0xA4
+	retlw	0xB6
+	retlw	0x58
+	retlw	0x4A
+	retlw	0x7C
+	retlw	0x6E
+	retlw	0x10
+	retlw	0x02
+	retlw	0x34
+	retlw	0x26
+	retlw	0xFA
+	retlw	0xE8
+	retlw	0xDE
+	retlw	0xCC
+	retlw	0xB2
+	retlw	0xA0
+	retlw	0x96
+	retlw	0x84
+	retlw	0x6A
+	retlw	0x78
+	retlw	0x4E
+	retlw	0x5C
+	retlw	0x22
+	retlw	0x30
+	retlw	0x06
+	retlw	0x14
+	retlw	0xAC
+	retlw	0xBE
+	retlw	0x88
+	retlw	0x9A
+	retlw	0xE4
+	retlw	0xF6
+	retlw	0xC0
+	retlw	0xD2
+	retlw	0x3C
+	retlw	0x2E
+	retlw	0x18
+	retlw	0x0A
+	retlw	0x74
+	retlw	0x66
+	retlw	0x50
+	retlw	0x42
+	retlw	0x9E
+	retlw	0x8C
+	retlw	0xBA
+	retlw	0xA8
+	retlw	0xD6
+	retlw	0xC4
+	retlw	0xF2
+	retlw	0xE0
+	retlw	0x0E
+	retlw	0x1C
+	retlw	0x2A
+	retlw	0x38
+	retlw	0x46
+	retlw	0x54
+	retlw	0x62
+	retlw	0x70
+	retlw	0x82
+	retlw	0x90
+	retlw	0xA6
+	retlw	0xB4
+	retlw	0xCA
+	retlw	0xD8
+	retlw	0xEE
+	retlw	0xFC
+	retlw	0x12
+	retlw	0x00
+	retlw	0x36
+	retlw	0x24
+	retlw	0x5A
+	retlw	0x48
+	retlw	0x7E
+	retlw	0x6C
+	retlw	0xB0
+	retlw	0xA2
+	retlw	0x94
+	retlw	0x86
+	retlw	0xF8
+	retlw	0xEA
+	retlw	0xDC
+	retlw	0xCE
+	retlw	0x20
+	retlw	0x32
+	retlw	0x04
+	retlw	0x16
+	retlw	0x68
+	retlw	0x7A
+	retlw	0x4C
+	retlw	0x5E
+	retlw	0xE6
+	retlw	0xF4
+	retlw	0xC2
+	retlw	0xD0
+	retlw	0xAE
+	retlw	0xBC
+	retlw	0x8A
+	retlw	0x98
+	retlw	0x76
+	retlw	0x64
+	retlw	0x52
+	retlw	0x40
+	retlw	0x3E
+	retlw	0x2C
+	retlw	0x1A
+	retlw	0x08
+	retlw	0xD4
+	retlw	0xC6
+	retlw	0xF0
+	retlw	0xE2
+	retlw	0x9C
+	retlw	0x8E
+	retlw	0xB8
+	retlw	0xAA
+	retlw	0x44
+	retlw	0x56
+	retlw	0x60
+	retlw	0x72
+	retlw	0x0C
+	retlw	0x1E
+	retlw	0x28
+	retlw	0x3A
+	retlw	0x4A
+	retlw	0x58
+	retlw	0x6E
+	retlw	0x7C
+	retlw	0x02
+	retlw	0x10
+	retlw	0x26
+	retlw	0x34
+	retlw	0xDA
+	retlw	0xC8
+	retlw	0xFE
+	retlw	0xEC
+	retlw	0x92
+	retlw	0x80
+	retlw	0xB6
+	retlw	0xA4
+	retlw	0x78
+	retlw	0x6A
+	retlw	0x5C
+	retlw	0x4E
+	retlw	0x30
+	retlw	0x22
+	retlw	0x14
+	retlw	0x06
+	retlw	0xE8
+	retlw	0xFA
+	retlw	0xCC
+	retlw	0xDE
+	retlw	0xA0
+	retlw	0xB2
+	retlw	0x84
+	retlw	0x96
+	retlw	0x2E
+	retlw	0x3C
+	retlw	0x0A
+	retlw	0x18
+	retlw	0x66
+	retlw	0x74
+	retlw	0x42
+	retlw	0x50
+	retlw	0xBE
+	retlw	0xAC
+	retlw	0x9A
+	retlw	0x88
+	retlw	0xF6
+	retlw	0xE4
+	retlw	0xD2
+	retlw	0xC0
+	retlw	0x1C
+	retlw	0x0E
+	retlw	0x38
+	retlw	0x2A
+	retlw	0x54
+	retlw	0x46
+	retlw	0x70
+	retlw	0x62
+	retlw	0x8C
+	retlw	0x9E
+	retlw	0xA8
+	retlw	0xBA
+	retlw	0xC4
+	retlw	0xD6
+	retlw	0xE0
+	retlw	0xF2
+
+	org	0x900
+
+LutCrc16H
+	retlw	0x00
+	retlw	0x10
+	retlw	0x20
+	retlw	0x30
+	retlw	0x40
+	retlw	0x50
+	retlw	0x60
+	retlw	0x70
+	retlw	0x81
+	retlw	0x91
+	retlw	0xA1
+	retlw	0xB1
+	retlw	0xC1
+	retlw	0xD1
+	retlw	0xE1
+	retlw	0xF1
+	retlw	0x12
+	retlw	0x02
+	retlw	0x32
+	retlw	0x22
+	retlw	0x52
+	retlw	0x42
+	retlw	0x72
+	retlw	0x62
+	retlw	0x93
+	retlw	0x83
+	retlw	0xB3
+	retlw	0xA3
+	retlw	0xD3
+	retlw	0xC3
+	retlw	0xF3
+	retlw	0xE3
+	retlw	0x24
+	retlw	0x34
+	retlw	0x04
+	retlw	0x14
+	retlw	0x64
+	retlw	0x74
+	retlw	0x44
+	retlw	0x54
+	retlw	0xA5
+	retlw	0xB5
+	retlw	0x85
+	retlw	0x95
+	retlw	0xE5
+	retlw	0xF5
+	retlw	0xC5
+	retlw	0xD5
+	retlw	0x36
+	retlw	0x26
+	retlw	0x16
+	retlw	0x06
+	retlw	0x76
+	retlw	0x66
+	retlw	0x56
+	retlw	0x46
+	retlw	0xB7
+	retlw	0xA7
+	retlw	0x97
+	retlw	0x87
+	retlw	0xF7
+	retlw	0xE7
+	retlw	0xD7
+	retlw	0xC7
+	retlw	0x48
+	retlw	0x58
+	retlw	0x68
+	retlw	0x78
+	retlw	0x08
+	retlw	0x18
+	retlw	0x28
+	retlw	0x38
+	retlw	0xC9
+	retlw	0xD9
+	retlw	0xE9
+	retlw	0xF9
+	retlw	0x89
+	retlw	0x99
+	retlw	0xA9
+	retlw	0xB9
+	retlw	0x5A
+	retlw	0x4A
+	retlw	0x7A
+	retlw	0x6A
+	retlw	0x1A
+	retlw	0x0A
+	retlw	0x3A
+	retlw	0x2A
+	retlw	0xDB
+	retlw	0xCB
+	retlw	0xFB
+	retlw	0xEB
+	retlw	0x9B
+	retlw	0x8B
+	retlw	0xBB
+	retlw	0xAB
+	retlw	0x6C
+	retlw	0x7C
+	retlw	0x4C
+	retlw	0x5C
+	retlw	0x2C
+	retlw	0x3C
+	retlw	0x0C
+	retlw	0x1C
+	retlw	0xED
+	retlw	0xFD
+	retlw	0xCD
+	retlw	0xDD
+	retlw	0xAD
+	retlw	0xBD
+	retlw	0x8D
+	retlw	0x9D
+	retlw	0x7E
+	retlw	0x6E
+	retlw	0x5E
+	retlw	0x4E
+	retlw	0x3E
+	retlw	0x2E
+	retlw	0x1E
+	retlw	0x0E
+	retlw	0xFF
+	retlw	0xEF
+	retlw	0xDF
+	retlw	0xCF
+	retlw	0xBF
+	retlw	0xAF
+	retlw	0x9F
+	retlw	0x8F
+	retlw	0x91
+	retlw	0x81
+	retlw	0xB1
+	retlw	0xA1
+	retlw	0xD1
+	retlw	0xC1
+	retlw	0xF1
+	retlw	0xE1
+	retlw	0x10
+	retlw	0x00
+	retlw	0x30
+	retlw	0x20
+	retlw	0x50
+	retlw	0x40
+	retlw	0x70
+	retlw	0x60
+	retlw	0x83
+	retlw	0x93
+	retlw	0xA3
+	retlw	0xB3
+	retlw	0xC3
+	retlw	0xD3
+	retlw	0xE3
+	retlw	0xF3
+	retlw	0x02
+	retlw	0x12
+	retlw	0x22
+	retlw	0x32
+	retlw	0x42
+	retlw	0x52
+	retlw	0x62
+	retlw	0x72
+	retlw	0xB5
+	retlw	0xA5
+	retlw	0x95
+	retlw	0x85
+	retlw	0xF5
+	retlw	0xE5
+	retlw	0xD5
+	retlw	0xC5
+	retlw	0x34
+	retlw	0x24
+	retlw	0x14
+	retlw	0x04
+	retlw	0x74
+	retlw	0x64
+	retlw	0x54
+	retlw	0x44
+	retlw	0xA7
+	retlw	0xB7
+	retlw	0x87
+	retlw	0x97
+	retlw	0xE7
+	retlw	0xF7
+	retlw	0xC7
+	retlw	0xD7
+	retlw	0x26
+	retlw	0x36
+	retlw	0x06
+	retlw	0x16
+	retlw	0x66
+	retlw	0x76
+	retlw	0x46
+	retlw	0x56
+	retlw	0xD9
+	retlw	0xC9
+	retlw	0xF9
+	retlw	0xE9
+	retlw	0x99
+	retlw	0x89
+	retlw	0xB9
+	retlw	0xA9
+	retlw	0x58
+	retlw	0x48
+	retlw	0x78
+	retlw	0x68
+	retlw	0x18
+	retlw	0x08
+	retlw	0x38
+	retlw	0x28
+	retlw	0xCB
+	retlw	0xDB
+	retlw	0xEB
+	retlw	0xFB
+	retlw	0x8B
+	retlw	0x9B
+	retlw	0xAB
+	retlw	0xBB
+	retlw	0x4A
+	retlw	0x5A
+	retlw	0x6A
+	retlw	0x7A
+	retlw	0x0A
+	retlw	0x1A
+	retlw	0x2A
+	retlw	0x3A
+	retlw	0xFD
+	retlw	0xED
+	retlw	0xDD
+	retlw	0xCD
+	retlw	0xBD
+	retlw	0xAD
+	retlw	0x9D
+	retlw	0x8D
+	retlw	0x7C
+	retlw	0x6C
+	retlw	0x5C
+	retlw	0x4C
+	retlw	0x3C
+	retlw	0x2C
+	retlw	0x1C
+	retlw	0x0C
+	retlw	0xEF
+	retlw	0xFF
+	retlw	0xCF
+	retlw	0xDF
+	retlw	0xAF
+	retlw	0xBF
+	retlw	0x8F
+	retlw	0x9F
+	retlw	0x6E
+	retlw	0x7E
+	retlw	0x4E
+	retlw	0x5E
+	retlw	0x2E
+	retlw	0x3E
+	retlw	0x0E
+	retlw	0x1E
+
+	org	0xA00
+
+LutCrc16L
+	retlw	0x00
+	retlw	0x21
+	retlw	0x42
+	retlw	0x63
+	retlw	0x84
+	retlw	0xA5
+	retlw	0xC6
+	retlw	0xE7
+	retlw	0x08
+	retlw	0x29
+	retlw	0x4A
+	retlw	0x6B
+	retlw	0x8C
+	retlw	0xAD
+	retlw	0xCE
+	retlw	0xEF
+	retlw	0x31
+	retlw	0x10
+	retlw	0x73
+	retlw	0x52
+	retlw	0xB5
+	retlw	0x94
+	retlw	0xF7
+	retlw	0xD6
+	retlw	0x39
+	retlw	0x18
+	retlw	0x7B
+	retlw	0x5A
+	retlw	0xBD
+	retlw	0x9C
+	retlw	0xFF
+	retlw	0xDE
+	retlw	0x62
+	retlw	0x43
+	retlw	0x20
+	retlw	0x01
+	retlw	0xE6
+	retlw	0xC7
+	retlw	0xA4
+	retlw	0x85
+	retlw	0x6A
+	retlw	0x4B
+	retlw	0x28
+	retlw	0x09
+	retlw	0xEE
+	retlw	0xCF
+	retlw	0xAC
+	retlw	0x8D
+	retlw	0x53
+	retlw	0x72
+	retlw	0x11
+	retlw	0x30
+	retlw	0xD7
+	retlw	0xF6
+	retlw	0x95
+	retlw	0xB4
+	retlw	0x5B
+	retlw	0x7A
+	retlw	0x19
+	retlw	0x38
+	retlw	0xDF
+	retlw	0xFE
+	retlw	0x9D
+	retlw	0xBC
+	retlw	0xC4
+	retlw	0xE5
+	retlw	0x86
+	retlw	0xA7
+	retlw	0x40
+	retlw	0x61
+	retlw	0x02
+	retlw	0x23
+	retlw	0xCC
+	retlw	0xED
+	retlw	0x8E
+	retlw	0xAF
+	retlw	0x48
+	retlw	0x69
+	retlw	0x0A
+	retlw	0x2B
+	retlw	0xF5
+	retlw	0xD4
+	retlw	0xB7
+	retlw	0x96
+	retlw	0x71
+	retlw	0x50
+	retlw	0x33
+	retlw	0x12
+	retlw	0xFD
+	retlw	0xDC
+	retlw	0xBF
+	retlw	0x9E
+	retlw	0x79
+	retlw	0x58
+	retlw	0x3B
+	retlw	0x1A
+	retlw	0xA6
+	retlw	0x87
+	retlw	0xE4
+	retlw	0xC5
+	retlw	0x22
+	retlw	0x03
+	retlw	0x60
+	retlw	0x41
+	retlw	0xAE
+	retlw	0x8F
+	retlw	0xEC
+	retlw	0xCD
+	retlw	0x2A
+	retlw	0x0B
+	retlw	0x68
+	retlw	0x49
+	retlw	0x97
+	retlw	0xB6
+	retlw	0xD5
+	retlw	0xF4
+	retlw	0x13
+	retlw	0x32
+	retlw	0x51
+	retlw	0x70
+	retlw	0x9F
+	retlw	0xBE
+	retlw	0xDD
+	retlw	0xFC
+	retlw	0x1B
+	retlw	0x3A
+	retlw	0x59
+	retlw	0x78
+	retlw	0x88
+	retlw	0xA9
+	retlw	0xCA
+	retlw	0xEB
+	retlw	0x0C
+	retlw	0x2D
+	retlw	0x4E
+	retlw	0x6F
+	retlw	0x80
+	retlw	0xA1
+	retlw	0xC2
+	retlw	0xE3
+	retlw	0x04
+	retlw	0x25
+	retlw	0x46
+	retlw	0x67
+	retlw	0xB9
+	retlw	0x98
+	retlw	0xFB
+	retlw	0xDA
+	retlw	0x3D
+	retlw	0x1C
+	retlw	0x7F
+	retlw	0x5E
+	retlw	0xB1
+	retlw	0x90
+	retlw	0xF3
+	retlw	0xD2
+	retlw	0x35
+	retlw	0x14
+	retlw	0x77
+	retlw	0x56
+	retlw	0xEA
+	retlw	0xCB
+	retlw	0xA8
+	retlw	0x89
+	retlw	0x6E
+	retlw	0x4F
+	retlw	0x2C
+	retlw	0x0D
+	retlw	0xE2
+	retlw	0xC3
+	retlw	0xA0
+	retlw	0x81
+	retlw	0x66
+	retlw	0x47
+	retlw	0x24
+	retlw	0x05
+	retlw	0xDB
+	retlw	0xFA
+	retlw	0x99
+	retlw	0xB8
+	retlw	0x5F
+	retlw	0x7E
+	retlw	0x1D
+	retlw	0x3C
+	retlw	0xD3
+	retlw	0xF2
+	retlw	0x91
+	retlw	0xB0
+	retlw	0x57
+	retlw	0x76
+	retlw	0x15
+	retlw	0x34
+	retlw	0x4C
+	retlw	0x6D
+	retlw	0x0E
+	retlw	0x2F
+	retlw	0xC8
+	retlw	0xE9
+	retlw	0x8A
+	retlw	0xAB
+	retlw	0x44
+	retlw	0x65
+	retlw	0x06
+	retlw	0x27
+	retlw	0xC0
+	retlw	0xE1
+	retlw	0x82
+	retlw	0xA3
+	retlw	0x7D
+	retlw	0x5C
+	retlw	0x3F
+	retlw	0x1E
+	retlw	0xF9
+	retlw	0xD8
+	retlw	0xBB
+	retlw	0x9A
+	retlw	0x75
+	retlw	0x54
+	retlw	0x37
+	retlw	0x16
+	retlw	0xF1
+	retlw	0xD0
+	retlw	0xB3
+	retlw	0x92
+	retlw	0x2E
+	retlw	0x0F
+	retlw	0x6C
+	retlw	0x4D
+	retlw	0xAA
+	retlw	0x8B
+	retlw	0xE8
+	retlw	0xC9
+	retlw	0x26
+	retlw	0x07
+	retlw	0x64
+	retlw	0x45
+	retlw	0xA2
+	retlw	0x83
+	retlw	0xE0
+	retlw	0xC1
+	retlw	0x1F
+	retlw	0x3E
+	retlw	0x5D
+	retlw	0x7C
+	retlw	0x9B
+	retlw	0xBA
+	retlw	0xD9
+	retlw	0xF8
+	retlw	0x17
+	retlw	0x36
+	retlw	0x55
+	retlw	0x74
+	retlw	0x93
+	retlw	0xB2
+	retlw	0xD1
+	retlw	0xF0
 
 
 ;;; Transmitter Code ;;;
 
-	org	0x17FE
+	org	0x1000
 
-XmitIdleJump
-	movlb	31		;We're in a state we don't know how to handle,
-	movlw	high IdleJump	; so warp into the idle jump table
-	movwf	TOSH		; "
-	movlw	low IdleJump	; "
-	movwf	TOSL		; "
-	movlb	0		; "
-	return			; "
-
-;Transmits GROUPS 7-byte groups of non-encoded data starting at FSR0.  Returns
-; to the caller only if all is well.  Trashes FSR0, TEMP, TEMP2, and GROUPS.
+;Transmits GROUPS 7-byte groups of non-encoded data starting at FSR0.  Sets
+; ABORTED if a phase change caused the command to be aborted, in which case
+; caller should return to idle state as soon as possible.  Trashes FSR0, TEMP,
+; TEMP2, and GROUPS.
 Transmit
-	bsf	FLAGS,TXNOTRC	;Set flags for a transmit
+	movlp	high Transmit	;Point PCLATH to this page so gotos work
+	movlb	0		;Point BSR to 0 so we can access PORTA/PORTC
+	bcf	FLAGS,ABORTED	;Clear aborted flag to start
 	movf	PORTA,W		;Check the current state
 	xorlw	B'00000100'	;If it's 2, then mac is ready for us to request
-	btfss	STATUS,Z	; to send; if it's anything else, we can't
-	bra	XmitIdleJump	; handle it so return to the idle jump table
+	btfss	STATUS,Z	; to send; if it's anything else, signal an
+	goto	XAbort		; abort to get us to the idle jump table ASAP
 	bcf	PORTC,RC4	;Assert !HSHK to request to send
 Transm0	movf	PORTA,W		;Check the current state
 	xorlw	B'00000100'	;If we're still in state 2, keep checking
@@ -1201,16 +1912,12 @@ Transm0	movf	PORTA,W		;Check the current state
 	xorlw	B'00000010'	;If we're in state 3, most likely mac is about
 	btfsc	STATUS,Z	; to change to state 1, so keep checking
 	bra	Transm0		; "
-	xorlw	B'00000100'	;If we're in state 1, get ready to send; if
-	btfss	STATUS,Z	; we're in any other state, we can't handle it
-	bra	XmitIdleJump	; here so return to the idle jump table
-	movlb	7		;Clear any IOC flags that have been set up to
-	clrf	IOCAF		; now
+	xorlw	B'00000100'	;If we're in state 1, get ready to send; if any
+	btfss	STATUS,Z	; other state, we can't handle it, so signal an
+	goto	XAbort		; abort to get us to the idle jump table ASAP
 	;fall through
 
 Transmitter
-	movlb	0		;Point BSR to 0 so we can access PORTC
-	bsf	INTCON,GIE	;Enable interrupts
 	movlw	128		;Set up fractional delay counter (see below)
 	movwf	TEMP		; "
 	movlw	30		;First send 30 groups of eight ones and two
@@ -1221,10 +1928,14 @@ XSyncLp	bcf	PORTC,RC4	; 0 IWM listens to falling edges only
 	btfsc	STATUS,C	;+3  cycles plus 16/47 of a cycle, approximated
 	bra	$+1		;+4  here as 87/256 of a cycle
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	DNOP			;-2 -1
 	bcf	PORTC,RC4	; 0
 	movlw	87		;+1
@@ -1232,10 +1943,14 @@ XSyncLp	bcf	PORTC,RC4	; 0 IWM listens to falling edges only
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	DNOP			;-2 -1
 	bcf	PORTC,RC4	; 0
 	movlw	87		;+1
@@ -1243,10 +1958,14 @@ XSyncLp	bcf	PORTC,RC4	; 0 IWM listens to falling edges only
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	DNOP			;-2 -1
 	bcf	PORTC,RC4	; 0
 	movlw	87		;+1
@@ -1254,10 +1973,14 @@ XSyncLp	bcf	PORTC,RC4	; 0 IWM listens to falling edges only
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	DNOP			;-2 -1
 	bcf	PORTC,RC4	; 0
 	movlw	87		;+1
@@ -1265,10 +1988,14 @@ XSyncLp	bcf	PORTC,RC4	; 0 IWM listens to falling edges only
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	DNOP			;-2 -1
 	bcf	PORTC,RC4	; 0
 	movlw	87		;+1
@@ -1276,10 +2003,14 @@ XSyncLp	bcf	PORTC,RC4	; 0 IWM listens to falling edges only
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	DNOP			;-2 -1
 	bcf	PORTC,RC4	; 0
 	movlw	87		;+1
@@ -1287,10 +2018,14 @@ XSyncLp	bcf	PORTC,RC4	; 0 IWM listens to falling edges only
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	DNOP			;-2 -1
 	bcf	PORTC,RC4	; 0
 	movlw	87		;+1
@@ -1298,10 +2033,14 @@ XSyncLp	bcf	PORTC,RC4	; 0 IWM listens to falling edges only
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	DNOP			;-2 -1
 	nop			; 0
 	movlw	87		;+1
@@ -1309,10 +2048,14 @@ XSyncLp	bcf	PORTC,RC4	; 0 IWM listens to falling edges only
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	DNOP			;-2 -1
 	nop			; 0
 	movlw	87		;+1
@@ -1320,12 +2063,14 @@ XSyncLp	bcf	PORTC,RC4	; 0 IWM listens to falling edges only
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
 	DNOP			;-6 -5
 	nop			;-4
-	decfsz	TEMP2,F		;-3
-	bra	XSyncLp		;-2 -1
+	decfsz	TEMP2,F		;-3 If we haven't yet transmitted the last of
+	bra	XSyncLp		;-2(-1)  the autosync groups, loop for another
 	nop			;-1
 XSync	bcf	PORTC,RC4	; 0 Start of 0xAA sync byte
 	movlw	87		;+1
@@ -1333,10 +2078,14 @@ XSync	bcf	PORTC,RC4	; 0 Start of 0xAA sync byte
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the byte; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the byte; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	DNOP			;-2 -1
 	nop			; 0
 	movlw	87		;+1
@@ -1344,10 +2093,14 @@ XSync	bcf	PORTC,RC4	; 0 Start of 0xAA sync byte
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the byte; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the byte; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	DNOP			;-2 -1
 	bcf	PORTC,RC4	; 0
 	movlw	87		;+1
@@ -1355,32 +2108,14 @@ XSync	bcf	PORTC,RC4	; 0 Start of 0xAA sync byte
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
-	DNOP			;-2 -1
-	nop			; 0
-	movlw	87		;+1
-	addwf	TEMP,F		;+2
-	btfsc	STATUS,C	;+3
-	bra	$+1		;+4
-	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
-	DNOP			;-2 -1
-	bcf	PORTC,RC4	; 0
-	movlw	87		;+1
-	addwf	TEMP,F		;+2
-	btfsc	STATUS,C	;+3
-	bra	$+1		;+4
-	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the byte; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the byte; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	DNOP			;-2 -1
 	nop			; 0
 	movlw	87		;+1
@@ -1388,10 +2123,14 @@ XSync	bcf	PORTC,RC4	; 0 Start of 0xAA sync byte
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the byte; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the byte; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	DNOP			;-2 -1
 	bcf	PORTC,RC4	; 0
 	movlw	87		;+1
@@ -1399,10 +2138,14 @@ XSync	bcf	PORTC,RC4	; 0 Start of 0xAA sync byte
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the byte; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the byte; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	DNOP			;-2 -1
 	nop			; 0
 	movlw	87		;+1
@@ -1410,22 +2153,59 @@ XSync	bcf	PORTC,RC4	; 0 Start of 0xAA sync byte
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
-	nop			;-2
-XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
-	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the byte; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the byte; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
+	DNOP			;-2 -1
+	bcf	PORTC,RC4	; 0
 	movlw	87		;+1
 	addwf	TEMP,F		;+2
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the byte; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the byte; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
+	DNOP			;-2 -1
+	nop			; 0
+	movlw	87		;+1
+	addwf	TEMP,F		;+2
+	btfsc	STATUS,C	;+3
+	bra	$+1		;+4
+	bsf	PORTC,RC4	;+5
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the byte; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the byte; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
+	DNOP			;-2 -1
+XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
+	movlw	87		;+1
+	addwf	TEMP,F		;+2
+	btfsc	STATUS,C	;+3
+	bra	$+1		;+4
+	bsf	PORTC,RC4	;+5
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	0[FSR0]		;-2
 	btfsc	WREG,7		;-1
 	bcf	PORTC,RC4	; 0
@@ -1434,10 +2214,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	0[FSR0]		;-2
 	btfsc	WREG,6		;-1
 	bcf	PORTC,RC4	; 0
@@ -1446,10 +2230,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	0[FSR0]		;-2
 	btfsc	WREG,5		;-1
 	bcf	PORTC,RC4	; 0
@@ -1458,10 +2246,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	0[FSR0]		;-2
 	btfsc	WREG,4		;-1
 	bcf	PORTC,RC4	; 0
@@ -1470,10 +2262,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	0[FSR0]		;-2
 	btfsc	WREG,3		;-1
 	bcf	PORTC,RC4	; 0
@@ -1482,10 +2278,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	0[FSR0]		;-2
 	btfsc	WREG,2		;-1
 	bcf	PORTC,RC4	; 0
@@ -1494,10 +2294,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	0[FSR0]		;-2
 	btfsc	WREG,1		;-1
 	bcf	PORTC,RC4	; 0
@@ -1506,10 +2310,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	DNOP			;-2 -1
 	bcf	PORTC,RC4	; 0
 	movlw	87		;+1
@@ -1517,10 +2325,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	1[FSR0]		;-2
 	btfsc	WREG,7		;-1
 	bcf	PORTC,RC4	; 0
@@ -1529,10 +2341,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	1[FSR0]		;-2
 	btfsc	WREG,6		;-1
 	bcf	PORTC,RC4	; 0
@@ -1541,10 +2357,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	1[FSR0]		;-2
 	btfsc	WREG,5		;-1
 	bcf	PORTC,RC4	; 0
@@ -1553,10 +2373,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	1[FSR0]		;-2
 	btfsc	WREG,4		;-1
 	bcf	PORTC,RC4	; 0
@@ -1565,10 +2389,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	1[FSR0]		;-2
 	btfsc	WREG,3		;-1
 	bcf	PORTC,RC4	; 0
@@ -1577,10 +2405,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	1[FSR0]		;-2
 	btfsc	WREG,2		;-1
 	bcf	PORTC,RC4	; 0
@@ -1589,10 +2421,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	1[FSR0]		;-2
 	btfsc	WREG,1		;-1
 	bcf	PORTC,RC4	; 0
@@ -1601,10 +2437,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	DNOP			;-2 -1
 	bcf	PORTC,RC4	; 0
 	movlw	87		;+1
@@ -1612,10 +2452,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	2[FSR0]		;-2
 	btfsc	WREG,7		;-1
 	bcf	PORTC,RC4	; 0
@@ -1624,10 +2468,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	2[FSR0]		;-2
 	btfsc	WREG,6		;-1
 	bcf	PORTC,RC4	; 0
@@ -1636,10 +2484,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	2[FSR0]		;-2
 	btfsc	WREG,5		;-1
 	bcf	PORTC,RC4	; 0
@@ -1648,10 +2500,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	2[FSR0]		;-2
 	btfsc	WREG,4		;-1
 	bcf	PORTC,RC4	; 0
@@ -1660,10 +2516,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	2[FSR0]		;-2
 	btfsc	WREG,3		;-1
 	bcf	PORTC,RC4	; 0
@@ -1672,10 +2532,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	2[FSR0]		;-2
 	btfsc	WREG,2		;-1
 	bcf	PORTC,RC4	; 0
@@ -1684,10 +2548,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	2[FSR0]		;-2
 	btfsc	WREG,1		;-1
 	bcf	PORTC,RC4	; 0
@@ -1696,10 +2564,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	DNOP			;-2 -1
 	bcf	PORTC,RC4	; 0
 	movlw	87		;+1
@@ -1707,10 +2579,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	3[FSR0]		;-2
 	btfsc	WREG,7		;-1
 	bcf	PORTC,RC4	; 0
@@ -1719,10 +2595,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	3[FSR0]		;-2
 	btfsc	WREG,6		;-1
 	bcf	PORTC,RC4	; 0
@@ -1731,10 +2611,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	3[FSR0]		;-2
 	btfsc	WREG,5		;-1
 	bcf	PORTC,RC4	; 0
@@ -1743,10 +2627,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	3[FSR0]		;-2
 	btfsc	WREG,4		;-1
 	bcf	PORTC,RC4	; 0
@@ -1755,10 +2643,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	3[FSR0]		;-2
 	btfsc	WREG,3		;-1
 	bcf	PORTC,RC4	; 0
@@ -1767,10 +2659,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	3[FSR0]		;-2
 	btfsc	WREG,2		;-1
 	bcf	PORTC,RC4	; 0
@@ -1779,10 +2675,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	3[FSR0]		;-2
 	btfsc	WREG,1		;-1
 	bcf	PORTC,RC4	; 0
@@ -1791,10 +2691,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	DNOP			;-2 -1
 	bcf	PORTC,RC4	; 0
 	movlw	87		;+1
@@ -1802,10 +2706,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	4[FSR0]		;-2
 	btfsc	WREG,7		;-1
 	bcf	PORTC,RC4	; 0
@@ -1814,10 +2722,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	4[FSR0]		;-2
 	btfsc	WREG,6		;-1
 	bcf	PORTC,RC4	; 0
@@ -1826,10 +2738,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	4[FSR0]		;-2
 	btfsc	WREG,5		;-1
 	bcf	PORTC,RC4	; 0
@@ -1838,10 +2754,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	4[FSR0]		;-2
 	btfsc	WREG,4		;-1
 	bcf	PORTC,RC4	; 0
@@ -1850,10 +2770,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	4[FSR0]		;-2
 	btfsc	WREG,3		;-1
 	bcf	PORTC,RC4	; 0
@@ -1862,10 +2786,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	4[FSR0]		;-2
 	btfsc	WREG,2		;-1
 	bcf	PORTC,RC4	; 0
@@ -1874,10 +2802,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	4[FSR0]		;-2
 	btfsc	WREG,1		;-1
 	bcf	PORTC,RC4	; 0
@@ -1886,10 +2818,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	DNOP			;-2 -1
 	bcf	PORTC,RC4	; 0
 	movlw	87		;+1
@@ -1897,10 +2833,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	5[FSR0]		;-2
 	btfsc	WREG,7		;-1
 	bcf	PORTC,RC4	; 0
@@ -1909,10 +2849,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	5[FSR0]		;-2
 	btfsc	WREG,6		;-1
 	bcf	PORTC,RC4	; 0
@@ -1921,10 +2865,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	5[FSR0]		;-2
 	btfsc	WREG,5		;-1
 	bcf	PORTC,RC4	; 0
@@ -1933,10 +2881,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	5[FSR0]		;-2
 	btfsc	WREG,4		;-1
 	bcf	PORTC,RC4	; 0
@@ -1945,10 +2897,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	5[FSR0]		;-2
 	btfsc	WREG,3		;-1
 	bcf	PORTC,RC4	; 0
@@ -1957,10 +2913,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	5[FSR0]		;-2
 	btfsc	WREG,2		;-1
 	bcf	PORTC,RC4	; 0
@@ -1969,10 +2929,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	5[FSR0]		;-2
 	btfsc	WREG,1		;-1
 	bcf	PORTC,RC4	; 0
@@ -1981,10 +2945,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	DNOP			;-2 -1
 	bcf	PORTC,RC4	; 0
 	movlw	87		;+1
@@ -1992,10 +2960,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	6[FSR0]		;-2
 	btfsc	WREG,7		;-1
 	bcf	PORTC,RC4	; 0
@@ -2004,10 +2976,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	6[FSR0]		;-2
 	btfsc	WREG,6		;-1
 	bcf	PORTC,RC4	; 0
@@ -2016,10 +2992,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	6[FSR0]		;-2
 	btfsc	WREG,5		;-1
 	bcf	PORTC,RC4	; 0
@@ -2028,10 +3008,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	6[FSR0]		;-2
 	btfsc	WREG,4		;-1
 	bcf	PORTC,RC4	; 0
@@ -2040,10 +3024,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	6[FSR0]		;-2
 	btfsc	WREG,3		;-1
 	bcf	PORTC,RC4	; 0
@@ -2052,10 +3040,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	6[FSR0]		;-2
 	btfsc	WREG,2		;-1
 	bcf	PORTC,RC4	; 0
@@ -2064,10 +3056,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	6[FSR0]		;-2
 	btfsc	WREG,1		;-1
 	bcf	PORTC,RC4	; 0
@@ -2076,10 +3072,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	DNOP			;-2 -1
 	bcf	PORTC,RC4	; 0
 	movlw	87		;+1
@@ -2087,10 +3087,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	6[FSR0]		;-2
 	btfsc	WREG,0		;-1
 	bcf	PORTC,RC4	; 0
@@ -2099,10 +3103,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	5[FSR0]		;-2
 	btfsc	WREG,0		;-1
 	bcf	PORTC,RC4	; 0
@@ -2111,10 +3119,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	4[FSR0]		;-2
 	btfsc	WREG,0		;-1
 	bcf	PORTC,RC4	; 0
@@ -2123,10 +3135,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	3[FSR0]		;-2
 	btfsc	WREG,0		;-1
 	bcf	PORTC,RC4	; 0
@@ -2135,10 +3151,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	2[FSR0]		;-2
 	btfsc	WREG,0		;-1
 	bcf	PORTC,RC4	; 0
@@ -2147,10 +3167,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	1[FSR0]		;-2
 	btfsc	WREG,0		;-1
 	bcf	PORTC,RC4	; 0
@@ -2159,10 +3183,14 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	DNOP			;+6 +7
-	DNOP			;-8 -7
-	DNOP			;-6 -5
-	DNOP			;-4 -3
+	movf	PORTA,W		;+6 Check the current state
+	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-8  continue transmitting the group; else,
+	goto	XAbort		;-7  abort and get us back to idle loop ASAP
+	movf	PORTA,W		;-6 Check the current state
+	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
+	btfss	STATUS,Z	;-4  continue transmitting the group; else,
+	goto	XAbort		;-3  abort and get us back to idle loop ASAP
 	moviw	0[FSR0]		;-2
 	btfsc	WREG,0		;-1
 	bcf	PORTC,RC4	; 0
@@ -2171,51 +3199,76 @@ XDataLp	bsf	INTCON,GIE	;-1 Reenable interrupts if they were disabled
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	nop			;+6
-	bcf	INTCON,GIE	;+7 Disable interrupts while we increment the
-	movlw	7		;-8  read pointer by 7 and decrement the group
-	addwf	FSR0L,F		;-7  count by 1 so the changes are all or
-	movlw	0		;-6  nothing; if group count has not yet hit
-	addwfc	FSR0H,F		;-5  zero, loop around to transmit the next
-	decfsz	GROUPS,F	;-4  group of seven bytes (sent as eight)
-	goto	XDataLp		;-3 -2  "
-XFiniLp	movf	PORTA,W		;Check the current state
+	movlw	7		;+6 Increment the pointer by 7 to transmit
+	addwf	FSR0L,F		;+7  the next group
+	movlw	0		;-8  "
+	addwfc	FSR0H,F		;-7  "
+	movf	PORTA,W		;-6 Check the current state
+	btfsc	STATUS,Z	;-5 If it's 0 (holdoff), then effect a suspend
+	bra	XSuspend	;-4  now that we're done transmitting a group
+	decfsz	GROUPS,F	;-3 We finished a group, decrement group count;
+	goto	XDataLp		;-2(-1)  if there are more, loop again
+	;fall through
+
+XFinished
+	movf	PORTA,W		;Check the current state
 	xorlw	B'00000010'	;If it's still 1 (communication), mac hasn't
 	btfsc	STATUS,Z	; realized we're done transmitting yet, so loop
-	bra	XFiniLp		; "
+	bra	XFinished	; "
 	xorlw	B'00000100'	;If it's 3 (request send), mac is probably
 	btfsc	STATUS,Z	; transitioning through on its way to 2, so
-	bra	XFiniLp		; loop
-	xorlw	B'00000010'	;If it's anything but 2 (idle), give it to the
-	btfss	STATUS,Z	; interrupt handler to deal with because
-	bsf	INTCON,GIE	; something weird's going on
+	bra	XFinished	; loop
+	xorlw	B'00000010'	;If it's anything but 2 (idle), set the flag
+	btfss	STATUS,Z	; for an aborted command to let the caller know
+	bsf	FLAGS,ABORTED	; that something weird's going on
+	movlp	0		;Reset PCLATH to where we're returning
+	return
+
+XSuspend
+	decf	GROUPS,F	;We finished a group, so decrement group count
+XSuspe0	movf	PORTA,W		;Check the current state
+	btfsc	STATUS,Z	;If it's 0 (holdoff), mac is still asking us to
+	bra	XSuspe0		; hold off, so loop again
+	xorlw	B'00000010'	;If it's anything else but 1 (communication),
+	btfss	STATUS,Z	; either mac wants to abort the command or
+	bra	XAbort		; something weird's going on, so abort
+	movf	GROUPS,F	;If mac asked us to suspend during the last
+	btfsc	STATUS,Z	; group, we resume by being finished and
+	bra	XFinished	; waiting to go to state 2 (idle)
+	goto	XSync		;Resume transmission after interrupted group
+
+XAbort
+	bsf	PORTC,RC4	;Deassert !HSHK if it was asserted
+	bsf	FLAGS,ABORTED	;Raise the aborted flag
+	movlp	0		;Reset PCLATH to where we're returning
 	return
 
 
 ;;; Receiver Code ;;;
 
-RecvIdleJump
-	movlb	31		;We're in a state we don't know how to handle,
-	movlw	high IdleJump	; so warp into the idle jump table
-	movwf	TOSH		; "
-	movlw	low IdleJump	; "
-	movwf	TOSL		; "
-	movlb	0		; "
-	return			; "
+	org	0x1800
 
-;Receives data from the mac.  Returns to the caller only if all is well.
-; Overwrites linear memory with received data in the following way: first byte
-; is sync byte, second byte is 0x80 + number of groups in command according to
-; mac, third byte is 0x80 + number of groups in anticipated response, followed
-; by a string of GROUPS seven-byte decoded groups.  Trashes FSR0, FSR1, TEMP,
-; and TEMP2.
+RecvAbort
+	bsf	PORTC,RC4	;Deassert !HSHK if it was asserted
+	bsf	FLAGS,ABORTED	;Raise the aborted flag
+	movlp	0		;Reset PCLATH to where we're returning
+	return
+
+;Receives data from the mac.  Sets ABORTED if a phase change caused the command
+; to be aborted, in which case caller should return to idle state as soon as
+; possible.  Overwrites linear memory with received data in the following way:
+; first byte is sync byte, second byte is 0x80 + number of groups in command
+; according to mac, third byte is 0x80 + number of groups in anticipated
+; response, followed by a string of GROUPS seven-byte decoded groups.  Trashes
+; FSR0, FSR1, TEMP, and TEMP2.
 Receive
+	movlb	0		;Point BSR to 0 so we can access PORTA/PORTC
+	bcf	FLAGS,ABORTED	;Clear aborted flag to start
 	movlw	0x20		;Reset both pointers to the top of linear
 	movwf	FSR0H		; memory
 	movwf	FSR1H		; "
 	clrf	FSR0L		; "
 	clrf	FSR1L		; "
-	bcf	FLAGS,TXNOTRC	;Set flags for a receive
 	clrf	GROUPS		;Clear counter of total received groups
 Receiv0	movf	PORTA,W		;Check the current state
 	xorlw	B'00000100'	;If it's 2, then mac hasn't said it's ready to
@@ -2223,7 +3276,7 @@ Receiv0	movf	PORTA,W		;Check the current state
 	bra	Receiv0		; "
 	xorlw	B'00000010'	;If it's 3, mac has said it's ready to send,
 	btfss	STATUS,Z	; if it's anything else, we can't handle it
-	bra	RecvIdleJump	; here so return to the idle jump table
+	bra	RecvAbort	; here so return to the idle jump table
 	bcf	PORTC,RC4	;Assert !HSHK to say we're ready to receive
 Receiv1	movf	PORTA,W		;If we're still in state 3, keep checking
 	xorlw	B'00000110'	; "
@@ -2231,1041 +3284,1195 @@ Receiv1	movf	PORTA,W		;If we're still in state 3, keep checking
 	bra	Receiv1		; "
 	xorlw	B'00000100'	;If we're in state 1, get ready to receive; if
 	btfss	STATUS,Z	; we're in any other state, we can't handle it
-	bra	RecvIdleJump	; here so return to the idle jump table
+	bra	RecvAbort	; here so return to the idle jump table
 	movlb	7		;Clear any IOC flags that have been set up to
 	clrf	IOCAF		; now
 	;fall through
 
 Receiver
+	movlp	high Receiver	;Point PCLATH to this page so gotos work
 	movlb	0		;Point BSR to 0 so we can access PORTC
-	bsf	INTCON,GIE	;Enable interrupts
-StZero	btfss	PORTC,RC5	;Signal starts at zero, wait until transition
+	bsf	INTCON,GIE	;Enable interrupts so we have a way to exit
+RcSt0	btfss	PORTC,RC5	;Signal starts at zero, wait until transition
 	bra	$-1		; to one, this is MSB (always 1) of first byte
 	movlw	B'10000000'	;003 cycles, 0.18 bit times
 	movwf	INDF0		;004 cycles, 0.24 bit times
-	DNOP			;005-006 cycles, 0.31-0.37 bit times
+	btfss	PORTA,RA1	;005 cycles, 0.31 bit times
+	bcf	INDF0,7		;006 cycles, 0.37 bit times
 	DNOP			;007-008 cycles, 0.43-0.49 bit times
 	btfss	PORTC,RC5	;009 cycles, 0.55 bit times
-	goto	ToZero6		;010 cycles, 0.61 bit times
+	goto	RcTo0_6		;010 cycles, 0.61 bit times
 	btfss	PORTC,RC5	;011 cycles, 0.67 bit times
-	goto	ToZero6		;012 cycles, 0.73 bit times
+	goto	RcTo0_6		;012 cycles, 0.73 bit times
 	btfss	PORTC,RC5	;013 cycles, 0.80 bit times
-	goto	ToZero6		;014 cycles, 0.86 bit times
+	goto	RcTo0_6		;014 cycles, 0.86 bit times
 	btfss	PORTC,RC5	;015 cycles, 0.92 bit times
-	goto	ToZero6		;016 cycles, 0.98 bit times
+	goto	RcTo0_6		;016 cycles, 0.98 bit times
 	btfss	PORTC,RC5	;017 cycles, 1.04 bit times
-	goto	ToZero6		;018 cycles, 1.10 bit times
+	goto	RcTo0_6		;018 cycles, 1.10 bit times
 	btfss	PORTC,RC5	;019 cycles, 1.16 bit times
-	goto	ToZero6		;020 cycles, 1.22 bit times
+	goto	RcTo0_6		;020 cycles, 1.22 bit times
 	btfss	PORTC,RC5	;021 cycles, 1.29 bit times
-	goto	ToZero6		;022 cycles, 1.35 bit times
+	goto	RcTo0_6		;022 cycles, 1.35 bit times
 	btfss	PORTC,RC5	;023 cycles, 1.41 bit times
-	goto	ToZero6		;024 cycles, 1.47 bit times
+	goto	RcTo0_6		;024 cycles, 1.47 bit times
 	btfss	PORTC,RC5	;025 cycles, 1.53 bit times
-	goto	ToZero5		;026 cycles, 1.59 bit times
+	goto	RcTo0_5		;026 cycles, 1.59 bit times
 	btfss	PORTC,RC5	;027 cycles, 1.65 bit times
-	goto	ToZero5		;028 cycles, 1.71 bit times
+	goto	RcTo0_5		;028 cycles, 1.71 bit times
 	btfss	PORTC,RC5	;029 cycles, 1.77 bit times
-	goto	ToZero5		;030 cycles, 1.84 bit times
+	goto	RcTo0_5		;030 cycles, 1.84 bit times
 	btfss	PORTC,RC5	;031 cycles, 1.90 bit times
-	goto	ToZero5		;032 cycles, 1.96 bit times
+	goto	RcTo0_5		;032 cycles, 1.96 bit times
 	btfss	PORTC,RC5	;033 cycles, 2.02 bit times
-	goto	ToZero5		;034 cycles, 2.08 bit times
+	goto	RcTo0_5		;034 cycles, 2.08 bit times
 	btfss	PORTC,RC5	;035 cycles, 2.14 bit times
-	goto	ToZero5		;036 cycles, 2.20 bit times
+	goto	RcTo0_5		;036 cycles, 2.20 bit times
 	btfss	PORTC,RC5	;037 cycles, 2.26 bit times
-	goto	ToZero5		;038 cycles, 2.33 bit times
+	goto	RcTo0_5		;038 cycles, 2.33 bit times
 	btfss	PORTC,RC5	;039 cycles, 2.39 bit times
-	goto	ToZero5		;040 cycles, 2.45 bit times
+	goto	RcTo0_5		;040 cycles, 2.45 bit times
 	btfss	PORTC,RC5	;041 cycles, 2.51 bit times
-	goto	ToZero4		;042 cycles, 2.57 bit times
+	goto	RcTo0_4		;042 cycles, 2.57 bit times
 	btfss	PORTC,RC5	;043 cycles, 2.63 bit times
-	goto	ToZero4		;044 cycles, 2.69 bit times
+	goto	RcTo0_4		;044 cycles, 2.69 bit times
 	btfss	PORTC,RC5	;045 cycles, 2.75 bit times
-	goto	ToZero4		;046 cycles, 2.82 bit times
+	goto	RcTo0_4		;046 cycles, 2.82 bit times
 	btfss	PORTC,RC5	;047 cycles, 2.88 bit times
-	goto	ToZero4		;048 cycles, 2.94 bit times
+	goto	RcTo0_4		;048 cycles, 2.94 bit times
 	btfss	PORTC,RC5	;049 cycles, 3.00 bit times
-	goto	ToZero4		;050 cycles, 3.06 bit times
+	goto	RcTo0_4		;050 cycles, 3.06 bit times
 	btfss	PORTC,RC5	;051 cycles, 3.12 bit times
-	goto	ToZero4		;052 cycles, 3.18 bit times
+	goto	RcTo0_4		;052 cycles, 3.18 bit times
 	btfss	PORTC,RC5	;053 cycles, 3.24 bit times
-	goto	ToZero4		;054 cycles, 3.30 bit times
+	goto	RcTo0_4		;054 cycles, 3.30 bit times
 	btfss	PORTC,RC5	;055 cycles, 3.37 bit times
-	goto	ToZero4		;056 cycles, 3.43 bit times
+	goto	RcTo0_4		;056 cycles, 3.43 bit times
 	btfss	PORTC,RC5	;057 cycles, 3.49 bit times
-	goto	ToZero4		;058 cycles, 3.55 bit times
+	goto	RcTo0_4		;058 cycles, 3.55 bit times
 	btfss	PORTC,RC5	;059 cycles, 3.61 bit times
-	goto	ToZero3		;060 cycles, 3.67 bit times
+	goto	RcTo0_3		;060 cycles, 3.67 bit times
 	btfss	PORTC,RC5	;061 cycles, 3.73 bit times
-	goto	ToZero3		;062 cycles, 3.79 bit times
+	goto	RcTo0_3		;062 cycles, 3.79 bit times
 	btfss	PORTC,RC5	;063 cycles, 3.86 bit times
-	goto	ToZero3		;064 cycles, 3.92 bit times
+	goto	RcTo0_3		;064 cycles, 3.92 bit times
 	btfss	PORTC,RC5	;065 cycles, 3.98 bit times
-	goto	ToZero3		;066 cycles, 4.04 bit times
+	goto	RcTo0_3		;066 cycles, 4.04 bit times
 	btfss	PORTC,RC5	;067 cycles, 4.10 bit times
-	goto	ToZero3		;068 cycles, 4.16 bit times
+	goto	RcTo0_3		;068 cycles, 4.16 bit times
 	btfss	PORTC,RC5	;069 cycles, 4.22 bit times
-	goto	ToZero3		;070 cycles, 4.28 bit times
+	goto	RcTo0_3		;070 cycles, 4.28 bit times
 	btfss	PORTC,RC5	;071 cycles, 4.35 bit times
-	goto	ToZero3		;072 cycles, 4.41 bit times
+	goto	RcTo0_3		;072 cycles, 4.41 bit times
 	btfss	PORTC,RC5	;073 cycles, 4.47 bit times
-	goto	ToZero3		;074 cycles, 4.53 bit times
+	goto	RcTo0_3		;074 cycles, 4.53 bit times
 	btfss	PORTC,RC5	;075 cycles, 4.59 bit times
-	goto	ToZero2		;076 cycles, 4.65 bit times
+	goto	RcTo0_2		;076 cycles, 4.65 bit times
 	btfss	PORTC,RC5	;077 cycles, 4.71 bit times
-	goto	ToZero2		;078 cycles, 4.77 bit times
+	goto	RcTo0_2		;078 cycles, 4.77 bit times
 	btfss	PORTC,RC5	;079 cycles, 4.83 bit times
-	goto	ToZero2		;080 cycles, 4.90 bit times
+	goto	RcTo0_2		;080 cycles, 4.90 bit times
 	btfss	PORTC,RC5	;081 cycles, 4.96 bit times
-	goto	ToZero2		;082 cycles, 5.02 bit times
+	goto	RcTo0_2		;082 cycles, 5.02 bit times
 	btfss	PORTC,RC5	;083 cycles, 5.08 bit times
-	goto	ToZero2		;084 cycles, 5.14 bit times
+	goto	RcTo0_2		;084 cycles, 5.14 bit times
 	btfss	PORTC,RC5	;085 cycles, 5.20 bit times
-	goto	ToZero2		;086 cycles, 5.26 bit times
+	goto	RcTo0_2		;086 cycles, 5.26 bit times
 	btfss	PORTC,RC5	;087 cycles, 5.32 bit times
-	goto	ToZero2		;088 cycles, 5.39 bit times
+	goto	RcTo0_2		;088 cycles, 5.39 bit times
 	btfss	PORTC,RC5	;089 cycles, 5.45 bit times
-	goto	ToZero2		;090 cycles, 5.51 bit times
+	goto	RcTo0_2		;090 cycles, 5.51 bit times
 	btfss	PORTC,RC5	;091 cycles, 5.57 bit times
-	goto	ToZero1		;092 cycles, 5.63 bit times
+	goto	RcTo0_1		;092 cycles, 5.63 bit times
 	btfss	PORTC,RC5	;093 cycles, 5.69 bit times
-	goto	ToZero1		;094 cycles, 5.75 bit times
+	goto	RcTo0_1		;094 cycles, 5.75 bit times
 	btfss	PORTC,RC5	;095 cycles, 5.81 bit times
-	goto	ToZero1		;096 cycles, 5.88 bit times
+	goto	RcTo0_1		;096 cycles, 5.88 bit times
 	btfss	PORTC,RC5	;097 cycles, 5.94 bit times
-	goto	ToZero1		;098 cycles, 6.00 bit times
+	goto	RcTo0_1		;098 cycles, 6.00 bit times
 	btfss	PORTC,RC5	;099 cycles, 6.06 bit times
-	goto	ToZero1		;100 cycles, 6.12 bit times
+	goto	RcTo0_1		;100 cycles, 6.12 bit times
 	btfss	PORTC,RC5	;101 cycles, 6.18 bit times
-	goto	ToZero1		;102 cycles, 6.24 bit times
+	goto	RcTo0_1		;102 cycles, 6.24 bit times
 	btfss	PORTC,RC5	;103 cycles, 6.30 bit times
-	goto	ToZero1		;104 cycles, 6.36 bit times
+	goto	RcTo0_1		;104 cycles, 6.36 bit times
 	btfss	PORTC,RC5	;105 cycles, 6.43 bit times
-	goto	ToZero1		;106 cycles, 6.49 bit times
+	goto	RcTo0_1		;106 cycles, 6.49 bit times
 	btfss	PORTC,RC5	;107 cycles, 6.55 bit times
-	goto	ToZero0		;108 cycles, 6.61 bit times
+	goto	RcTo0_0		;108 cycles, 6.61 bit times
 	btfss	PORTC,RC5	;109 cycles, 6.67 bit times
-	goto	ToZero0		;110 cycles, 6.73 bit times
+	goto	RcTo0_0		;110 cycles, 6.73 bit times
 	btfss	PORTC,RC5	;111 cycles, 6.79 bit times
-	goto	ToZero0		;112 cycles, 6.85 bit times
+	goto	RcTo0_0		;112 cycles, 6.85 bit times
 	btfss	PORTC,RC5	;113 cycles, 6.92 bit times
-	goto	ToZero0		;114 cycles, 6.98 bit times
+	goto	RcTo0_0		;114 cycles, 6.98 bit times
 	btfss	PORTC,RC5	;115 cycles, 7.04 bit times
-	goto	ToZero0		;116 cycles, 7.10 bit times
+	goto	RcTo0_0		;116 cycles, 7.10 bit times
 	btfss	PORTC,RC5	;117 cycles, 7.16 bit times
-	goto	ToZero0		;118 cycles, 7.22 bit times
+	goto	RcTo0_0		;118 cycles, 7.22 bit times
 	btfss	PORTC,RC5	;119 cycles, 7.28 bit times
-	goto	ToZero0		;120 cycles, 7.34 bit times
+	goto	RcTo0_0		;120 cycles, 7.34 bit times
 	btfss	PORTC,RC5	;121 cycles, 7.40 bit times
-	goto	ToZero0		;122 cycles, 7.47 bit times
-	moviw	FSR0++		;123 cycles, 7.53 bit times
-	goto	StOne		;124 cycles, 7.59 bit times
+	goto	RcTo0_0		;122 cycles, 7.47 bit times
+	btfss	PORTA,RA1	;123 cycles, 7.53 bit times
+	bcf	INDF0,7		;124 cycles, 7.59 bit times
+	moviw	FSR0++		;125 cycles, 7.65 bit times
+	goto	RcSt1		;126 cycles, 7.71 bit times
 
-ToOne6	movlw	B'01000000'	;003 cycles, 0.18 bit times
+RcTo1_6	movlw	B'01000000'	;003 cycles, 0.18 bit times
 	iorwf	INDF0,F		;004 cycles, 0.24 bit times
-	DNOP			;005-006 cycles, 0.31-0.37 bit times
+	btfss	PORTA,RA1	;005 cycles, 0.31 bit times
+	bcf	INDF0,7		;006 cycles, 0.37 bit times
 	DNOP			;007-008 cycles, 0.43-0.49 bit times
 	btfss	PORTC,RC5	;009 cycles, 0.55 bit times
-	goto	ToZero5		;010 cycles, 0.61 bit times
+	goto	RcTo0_5		;010 cycles, 0.61 bit times
 	btfss	PORTC,RC5	;011 cycles, 0.67 bit times
-	goto	ToZero5		;012 cycles, 0.73 bit times
+	goto	RcTo0_5		;012 cycles, 0.73 bit times
 	btfss	PORTC,RC5	;013 cycles, 0.80 bit times
-	goto	ToZero5		;014 cycles, 0.86 bit times
+	goto	RcTo0_5		;014 cycles, 0.86 bit times
 	btfss	PORTC,RC5	;015 cycles, 0.92 bit times
-	goto	ToZero5		;016 cycles, 0.98 bit times
+	goto	RcTo0_5		;016 cycles, 0.98 bit times
 	btfss	PORTC,RC5	;017 cycles, 1.04 bit times
-	goto	ToZero5		;018 cycles, 1.10 bit times
+	goto	RcTo0_5		;018 cycles, 1.10 bit times
 	btfss	PORTC,RC5	;019 cycles, 1.16 bit times
-	goto	ToZero5		;020 cycles, 1.22 bit times
+	goto	RcTo0_5		;020 cycles, 1.22 bit times
 	btfss	PORTC,RC5	;021 cycles, 1.29 bit times
-	goto	ToZero5		;022 cycles, 1.35 bit times
+	goto	RcTo0_5		;022 cycles, 1.35 bit times
 	btfss	PORTC,RC5	;023 cycles, 1.41 bit times
-	goto	ToZero5		;024 cycles, 1.47 bit times
+	goto	RcTo0_5		;024 cycles, 1.47 bit times
 	btfss	PORTC,RC5	;025 cycles, 1.53 bit times
-	goto	ToZero4		;026 cycles, 1.59 bit times
+	goto	RcTo0_4		;026 cycles, 1.59 bit times
 	btfss	PORTC,RC5	;027 cycles, 1.65 bit times
-	goto	ToZero4		;028 cycles, 1.71 bit times
+	goto	RcTo0_4		;028 cycles, 1.71 bit times
 	btfss	PORTC,RC5	;029 cycles, 1.77 bit times
-	goto	ToZero4		;030 cycles, 1.84 bit times
+	goto	RcTo0_4		;030 cycles, 1.84 bit times
 	btfss	PORTC,RC5	;031 cycles, 1.90 bit times
-	goto	ToZero4		;032 cycles, 1.96 bit times
+	goto	RcTo0_4		;032 cycles, 1.96 bit times
 	btfss	PORTC,RC5	;033 cycles, 2.02 bit times
-	goto	ToZero4		;034 cycles, 2.08 bit times
+	goto	RcTo0_4		;034 cycles, 2.08 bit times
 	btfss	PORTC,RC5	;035 cycles, 2.14 bit times
-	goto	ToZero4		;036 cycles, 2.20 bit times
+	goto	RcTo0_4		;036 cycles, 2.20 bit times
 	btfss	PORTC,RC5	;037 cycles, 2.26 bit times
-	goto	ToZero4		;038 cycles, 2.33 bit times
+	goto	RcTo0_4		;038 cycles, 2.33 bit times
 	btfss	PORTC,RC5	;039 cycles, 2.39 bit times
-	goto	ToZero4		;040 cycles, 2.45 bit times
+	goto	RcTo0_4		;040 cycles, 2.45 bit times
 	btfss	PORTC,RC5	;041 cycles, 2.51 bit times
-	goto	ToZero3		;042 cycles, 2.57 bit times
+	goto	RcTo0_3		;042 cycles, 2.57 bit times
 	btfss	PORTC,RC5	;043 cycles, 2.63 bit times
-	goto	ToZero3		;044 cycles, 2.69 bit times
+	goto	RcTo0_3		;044 cycles, 2.69 bit times
 	btfss	PORTC,RC5	;045 cycles, 2.75 bit times
-	goto	ToZero3		;046 cycles, 2.82 bit times
+	goto	RcTo0_3		;046 cycles, 2.82 bit times
 	btfss	PORTC,RC5	;047 cycles, 2.88 bit times
-	goto	ToZero3		;048 cycles, 2.94 bit times
+	goto	RcTo0_3		;048 cycles, 2.94 bit times
 	btfss	PORTC,RC5	;049 cycles, 3.00 bit times
-	goto	ToZero3		;050 cycles, 3.06 bit times
+	goto	RcTo0_3		;050 cycles, 3.06 bit times
 	btfss	PORTC,RC5	;051 cycles, 3.12 bit times
-	goto	ToZero3		;052 cycles, 3.18 bit times
+	goto	RcTo0_3		;052 cycles, 3.18 bit times
 	btfss	PORTC,RC5	;053 cycles, 3.24 bit times
-	goto	ToZero3		;054 cycles, 3.30 bit times
+	goto	RcTo0_3		;054 cycles, 3.30 bit times
 	btfss	PORTC,RC5	;055 cycles, 3.37 bit times
-	goto	ToZero3		;056 cycles, 3.43 bit times
+	goto	RcTo0_3		;056 cycles, 3.43 bit times
 	btfss	PORTC,RC5	;057 cycles, 3.49 bit times
-	goto	ToZero3		;058 cycles, 3.55 bit times
+	goto	RcTo0_3		;058 cycles, 3.55 bit times
 	btfss	PORTC,RC5	;059 cycles, 3.61 bit times
-	goto	ToZero2		;060 cycles, 3.67 bit times
+	goto	RcTo0_2		;060 cycles, 3.67 bit times
 	btfss	PORTC,RC5	;061 cycles, 3.73 bit times
-	goto	ToZero2		;062 cycles, 3.79 bit times
+	goto	RcTo0_2		;062 cycles, 3.79 bit times
 	btfss	PORTC,RC5	;063 cycles, 3.86 bit times
-	goto	ToZero2		;064 cycles, 3.92 bit times
+	goto	RcTo0_2		;064 cycles, 3.92 bit times
 	btfss	PORTC,RC5	;065 cycles, 3.98 bit times
-	goto	ToZero2		;066 cycles, 4.04 bit times
+	goto	RcTo0_2		;066 cycles, 4.04 bit times
 	btfss	PORTC,RC5	;067 cycles, 4.10 bit times
-	goto	ToZero2		;068 cycles, 4.16 bit times
+	goto	RcTo0_2		;068 cycles, 4.16 bit times
 	btfss	PORTC,RC5	;069 cycles, 4.22 bit times
-	goto	ToZero2		;070 cycles, 4.28 bit times
+	goto	RcTo0_2		;070 cycles, 4.28 bit times
 	btfss	PORTC,RC5	;071 cycles, 4.35 bit times
-	goto	ToZero2		;072 cycles, 4.41 bit times
+	goto	RcTo0_2		;072 cycles, 4.41 bit times
 	btfss	PORTC,RC5	;073 cycles, 4.47 bit times
-	goto	ToZero2		;074 cycles, 4.53 bit times
+	goto	RcTo0_2		;074 cycles, 4.53 bit times
 	btfss	PORTC,RC5	;075 cycles, 4.59 bit times
-	goto	ToZero1		;076 cycles, 4.65 bit times
+	goto	RcTo0_1		;076 cycles, 4.65 bit times
 	btfss	PORTC,RC5	;077 cycles, 4.71 bit times
-	goto	ToZero1		;078 cycles, 4.77 bit times
+	goto	RcTo0_1		;078 cycles, 4.77 bit times
 	btfss	PORTC,RC5	;079 cycles, 4.83 bit times
-	goto	ToZero1		;080 cycles, 4.90 bit times
+	goto	RcTo0_1		;080 cycles, 4.90 bit times
 	btfss	PORTC,RC5	;081 cycles, 4.96 bit times
-	goto	ToZero1		;082 cycles, 5.02 bit times
+	goto	RcTo0_1		;082 cycles, 5.02 bit times
 	btfss	PORTC,RC5	;083 cycles, 5.08 bit times
-	goto	ToZero1		;084 cycles, 5.14 bit times
+	goto	RcTo0_1		;084 cycles, 5.14 bit times
 	btfss	PORTC,RC5	;085 cycles, 5.20 bit times
-	goto	ToZero1		;086 cycles, 5.26 bit times
+	goto	RcTo0_1		;086 cycles, 5.26 bit times
 	btfss	PORTC,RC5	;087 cycles, 5.32 bit times
-	goto	ToZero1		;088 cycles, 5.39 bit times
+	goto	RcTo0_1		;088 cycles, 5.39 bit times
 	btfss	PORTC,RC5	;089 cycles, 5.45 bit times
-	goto	ToZero1		;090 cycles, 5.51 bit times
+	goto	RcTo0_1		;090 cycles, 5.51 bit times
 	btfss	PORTC,RC5	;091 cycles, 5.57 bit times
-	goto	ToZero0		;092 cycles, 5.63 bit times
+	goto	RcTo0_0		;092 cycles, 5.63 bit times
 	btfss	PORTC,RC5	;093 cycles, 5.69 bit times
-	goto	ToZero0		;094 cycles, 5.75 bit times
+	goto	RcTo0_0		;094 cycles, 5.75 bit times
 	btfss	PORTC,RC5	;095 cycles, 5.81 bit times
-	goto	ToZero0		;096 cycles, 5.88 bit times
+	goto	RcTo0_0		;096 cycles, 5.88 bit times
 	btfss	PORTC,RC5	;097 cycles, 5.94 bit times
-	goto	ToZero0		;098 cycles, 6.00 bit times
+	goto	RcTo0_0		;098 cycles, 6.00 bit times
 	btfss	PORTC,RC5	;099 cycles, 6.06 bit times
-	goto	ToZero0		;100 cycles, 6.12 bit times
+	goto	RcTo0_0		;100 cycles, 6.12 bit times
 	btfss	PORTC,RC5	;101 cycles, 6.18 bit times
-	goto	ToZero0		;102 cycles, 6.24 bit times
+	goto	RcTo0_0		;102 cycles, 6.24 bit times
 	btfss	PORTC,RC5	;103 cycles, 6.30 bit times
-	goto	ToZero0		;104 cycles, 6.36 bit times
+	goto	RcTo0_0		;104 cycles, 6.36 bit times
 	btfss	PORTC,RC5	;105 cycles, 6.43 bit times
-	goto	ToZero0		;106 cycles, 6.49 bit times
-	moviw	FSR0++		;107 cycles, 6.55 bit times
-	goto	StOne		;108 cycles, 6.61 bit times
+	goto	RcTo0_0		;106 cycles, 6.49 bit times
+	btfss	PORTA,RA1	;107 cycles, 6.55 bit times
+	bcf	INDF0,7		;108 cycles, 6.61 bit times
+	moviw	FSR0++		;109 cycles, 6.67 bit times
+	goto	RcSt1		;110 cycles, 6.73 bit times
 
-ToOne5	movlw	B'00100000'	;003 cycles, 0.18 bit times
+RcTo1_5	movlw	B'00100000'	;003 cycles, 0.18 bit times
 	iorwf	INDF0,F		;004 cycles, 0.24 bit times
-	DNOP			;005-006 cycles, 0.31-0.37 bit times
+	btfss	PORTA,RA1	;005 cycles, 0.31 bit times
+	bcf	INDF0,7		;006 cycles, 0.37 bit times
 	DNOP			;007-008 cycles, 0.43-0.49 bit times
 	btfss	PORTC,RC5	;009 cycles, 0.55 bit times
-	goto	ToZero4		;010 cycles, 0.61 bit times
+	goto	RcTo0_4		;010 cycles, 0.61 bit times
 	btfss	PORTC,RC5	;011 cycles, 0.67 bit times
-	goto	ToZero4		;012 cycles, 0.73 bit times
+	goto	RcTo0_4		;012 cycles, 0.73 bit times
 	btfss	PORTC,RC5	;013 cycles, 0.80 bit times
-	goto	ToZero4		;014 cycles, 0.86 bit times
+	goto	RcTo0_4		;014 cycles, 0.86 bit times
 	btfss	PORTC,RC5	;015 cycles, 0.92 bit times
-	goto	ToZero4		;016 cycles, 0.98 bit times
+	goto	RcTo0_4		;016 cycles, 0.98 bit times
 	btfss	PORTC,RC5	;017 cycles, 1.04 bit times
-	goto	ToZero4		;018 cycles, 1.10 bit times
+	goto	RcTo0_4		;018 cycles, 1.10 bit times
 	btfss	PORTC,RC5	;019 cycles, 1.16 bit times
-	goto	ToZero4		;020 cycles, 1.22 bit times
+	goto	RcTo0_4		;020 cycles, 1.22 bit times
 	btfss	PORTC,RC5	;021 cycles, 1.29 bit times
-	goto	ToZero4		;022 cycles, 1.35 bit times
+	goto	RcTo0_4		;022 cycles, 1.35 bit times
 	btfss	PORTC,RC5	;023 cycles, 1.41 bit times
-	goto	ToZero4		;024 cycles, 1.47 bit times
+	goto	RcTo0_4		;024 cycles, 1.47 bit times
 	btfss	PORTC,RC5	;025 cycles, 1.53 bit times
-	goto	ToZero3		;026 cycles, 1.59 bit times
+	goto	RcTo0_3		;026 cycles, 1.59 bit times
 	btfss	PORTC,RC5	;027 cycles, 1.65 bit times
-	goto	ToZero3		;028 cycles, 1.71 bit times
+	goto	RcTo0_3		;028 cycles, 1.71 bit times
 	btfss	PORTC,RC5	;029 cycles, 1.77 bit times
-	goto	ToZero3		;030 cycles, 1.84 bit times
+	goto	RcTo0_3		;030 cycles, 1.84 bit times
 	btfss	PORTC,RC5	;031 cycles, 1.90 bit times
-	goto	ToZero3		;032 cycles, 1.96 bit times
+	goto	RcTo0_3		;032 cycles, 1.96 bit times
 	btfss	PORTC,RC5	;033 cycles, 2.02 bit times
-	goto	ToZero3		;034 cycles, 2.08 bit times
+	goto	RcTo0_3		;034 cycles, 2.08 bit times
 	btfss	PORTC,RC5	;035 cycles, 2.14 bit times
-	goto	ToZero3		;036 cycles, 2.20 bit times
+	goto	RcTo0_3		;036 cycles, 2.20 bit times
 	btfss	PORTC,RC5	;037 cycles, 2.26 bit times
-	goto	ToZero3		;038 cycles, 2.33 bit times
+	goto	RcTo0_3		;038 cycles, 2.33 bit times
 	btfss	PORTC,RC5	;039 cycles, 2.39 bit times
-	goto	ToZero3		;040 cycles, 2.45 bit times
+	goto	RcTo0_3		;040 cycles, 2.45 bit times
 	btfss	PORTC,RC5	;041 cycles, 2.51 bit times
-	goto	ToZero2		;042 cycles, 2.57 bit times
+	goto	RcTo0_2		;042 cycles, 2.57 bit times
 	btfss	PORTC,RC5	;043 cycles, 2.63 bit times
-	goto	ToZero2		;044 cycles, 2.69 bit times
+	goto	RcTo0_2		;044 cycles, 2.69 bit times
 	btfss	PORTC,RC5	;045 cycles, 2.75 bit times
-	goto	ToZero2		;046 cycles, 2.82 bit times
+	goto	RcTo0_2		;046 cycles, 2.82 bit times
 	btfss	PORTC,RC5	;047 cycles, 2.88 bit times
-	goto	ToZero2		;048 cycles, 2.94 bit times
+	goto	RcTo0_2		;048 cycles, 2.94 bit times
 	btfss	PORTC,RC5	;049 cycles, 3.00 bit times
-	goto	ToZero2		;050 cycles, 3.06 bit times
+	goto	RcTo0_2		;050 cycles, 3.06 bit times
 	btfss	PORTC,RC5	;051 cycles, 3.12 bit times
-	goto	ToZero2		;052 cycles, 3.18 bit times
+	goto	RcTo0_2		;052 cycles, 3.18 bit times
 	btfss	PORTC,RC5	;053 cycles, 3.24 bit times
-	goto	ToZero2		;054 cycles, 3.30 bit times
+	goto	RcTo0_2		;054 cycles, 3.30 bit times
 	btfss	PORTC,RC5	;055 cycles, 3.37 bit times
-	goto	ToZero2		;056 cycles, 3.43 bit times
+	goto	RcTo0_2		;056 cycles, 3.43 bit times
 	btfss	PORTC,RC5	;057 cycles, 3.49 bit times
-	goto	ToZero2		;058 cycles, 3.55 bit times
+	goto	RcTo0_2		;058 cycles, 3.55 bit times
 	btfss	PORTC,RC5	;059 cycles, 3.61 bit times
-	goto	ToZero1		;060 cycles, 3.67 bit times
+	goto	RcTo0_1		;060 cycles, 3.67 bit times
 	btfss	PORTC,RC5	;061 cycles, 3.73 bit times
-	goto	ToZero1		;062 cycles, 3.79 bit times
+	goto	RcTo0_1		;062 cycles, 3.79 bit times
 	btfss	PORTC,RC5	;063 cycles, 3.86 bit times
-	goto	ToZero1		;064 cycles, 3.92 bit times
+	goto	RcTo0_1		;064 cycles, 3.92 bit times
 	btfss	PORTC,RC5	;065 cycles, 3.98 bit times
-	goto	ToZero1		;066 cycles, 4.04 bit times
+	goto	RcTo0_1		;066 cycles, 4.04 bit times
 	btfss	PORTC,RC5	;067 cycles, 4.10 bit times
-	goto	ToZero1		;068 cycles, 4.16 bit times
+	goto	RcTo0_1		;068 cycles, 4.16 bit times
 	btfss	PORTC,RC5	;069 cycles, 4.22 bit times
-	goto	ToZero1		;070 cycles, 4.28 bit times
+	goto	RcTo0_1		;070 cycles, 4.28 bit times
 	btfss	PORTC,RC5	;071 cycles, 4.35 bit times
-	goto	ToZero1		;072 cycles, 4.41 bit times
+	goto	RcTo0_1		;072 cycles, 4.41 bit times
 	btfss	PORTC,RC5	;073 cycles, 4.47 bit times
-	goto	ToZero1		;074 cycles, 4.53 bit times
+	goto	RcTo0_1		;074 cycles, 4.53 bit times
 	btfss	PORTC,RC5	;075 cycles, 4.59 bit times
-	goto	ToZero0		;076 cycles, 4.65 bit times
+	goto	RcTo0_0		;076 cycles, 4.65 bit times
 	btfss	PORTC,RC5	;077 cycles, 4.71 bit times
-	goto	ToZero0		;078 cycles, 4.77 bit times
+	goto	RcTo0_0		;078 cycles, 4.77 bit times
 	btfss	PORTC,RC5	;079 cycles, 4.83 bit times
-	goto	ToZero0		;080 cycles, 4.90 bit times
+	goto	RcTo0_0		;080 cycles, 4.90 bit times
 	btfss	PORTC,RC5	;081 cycles, 4.96 bit times
-	goto	ToZero0		;082 cycles, 5.02 bit times
+	goto	RcTo0_0		;082 cycles, 5.02 bit times
 	btfss	PORTC,RC5	;083 cycles, 5.08 bit times
-	goto	ToZero0		;084 cycles, 5.14 bit times
+	goto	RcTo0_0		;084 cycles, 5.14 bit times
 	btfss	PORTC,RC5	;085 cycles, 5.20 bit times
-	goto	ToZero0		;086 cycles, 5.26 bit times
+	goto	RcTo0_0		;086 cycles, 5.26 bit times
 	btfss	PORTC,RC5	;087 cycles, 5.32 bit times
-	goto	ToZero0		;088 cycles, 5.39 bit times
+	goto	RcTo0_0		;088 cycles, 5.39 bit times
 	btfss	PORTC,RC5	;089 cycles, 5.45 bit times
-	goto	ToZero0		;090 cycles, 5.51 bit times
-	moviw	FSR0++		;091 cycles, 5.57 bit times
-	goto	StOne		;092 cycles, 5.63 bit times
+	goto	RcTo0_0		;090 cycles, 5.51 bit times
+	btfss	PORTA,RA1	;091 cycles, 5.57 bit times
+	bcf	INDF0,7		;092 cycles, 5.63 bit times
+	moviw	FSR0++		;093 cycles, 5.69 bit times
+	goto	RcSt1		;094 cycles, 5.75 bit times
 
-ToOne4	movlw	B'00010000'	;003 cycles, 0.18 bit times
+RcTo1_4	movlw	B'00010000'	;003 cycles, 0.18 bit times
 	iorwf	INDF0,F		;004 cycles, 0.24 bit times
-	DNOP			;005-006 cycles, 0.31-0.37 bit times
+	btfss	PORTA,RA1	;005 cycles, 0.31 bit times
+	bcf	INDF0,7		;006 cycles, 0.37 bit times
 	DNOP			;007-008 cycles, 0.43-0.49 bit times
 	btfss	PORTC,RC5	;009 cycles, 0.55 bit times
-	goto	ToZero3		;010 cycles, 0.61 bit times
+	goto	RcTo0_3		;010 cycles, 0.61 bit times
 	btfss	PORTC,RC5	;011 cycles, 0.67 bit times
-	goto	ToZero3		;012 cycles, 0.73 bit times
+	goto	RcTo0_3		;012 cycles, 0.73 bit times
 	btfss	PORTC,RC5	;013 cycles, 0.80 bit times
-	goto	ToZero3		;014 cycles, 0.86 bit times
+	goto	RcTo0_3		;014 cycles, 0.86 bit times
 	btfss	PORTC,RC5	;015 cycles, 0.92 bit times
-	goto	ToZero3		;016 cycles, 0.98 bit times
+	goto	RcTo0_3		;016 cycles, 0.98 bit times
 	btfss	PORTC,RC5	;017 cycles, 1.04 bit times
-	goto	ToZero3		;018 cycles, 1.10 bit times
+	goto	RcTo0_3		;018 cycles, 1.10 bit times
 	btfss	PORTC,RC5	;019 cycles, 1.16 bit times
-	goto	ToZero3		;020 cycles, 1.22 bit times
+	goto	RcTo0_3		;020 cycles, 1.22 bit times
 	btfss	PORTC,RC5	;021 cycles, 1.29 bit times
-	goto	ToZero3		;022 cycles, 1.35 bit times
+	goto	RcTo0_3		;022 cycles, 1.35 bit times
 	btfss	PORTC,RC5	;023 cycles, 1.41 bit times
-	goto	ToZero3		;024 cycles, 1.47 bit times
+	goto	RcTo0_3		;024 cycles, 1.47 bit times
 	btfss	PORTC,RC5	;025 cycles, 1.53 bit times
-	goto	ToZero2		;026 cycles, 1.59 bit times
+	goto	RcTo0_2		;026 cycles, 1.59 bit times
 	btfss	PORTC,RC5	;027 cycles, 1.65 bit times
-	goto	ToZero2		;028 cycles, 1.71 bit times
+	goto	RcTo0_2		;028 cycles, 1.71 bit times
 	btfss	PORTC,RC5	;029 cycles, 1.77 bit times
-	goto	ToZero2		;030 cycles, 1.84 bit times
+	goto	RcTo0_2		;030 cycles, 1.84 bit times
 	btfss	PORTC,RC5	;031 cycles, 1.90 bit times
-	goto	ToZero2		;032 cycles, 1.96 bit times
+	goto	RcTo0_2		;032 cycles, 1.96 bit times
 	btfss	PORTC,RC5	;033 cycles, 2.02 bit times
-	goto	ToZero2		;034 cycles, 2.08 bit times
+	goto	RcTo0_2		;034 cycles, 2.08 bit times
 	btfss	PORTC,RC5	;035 cycles, 2.14 bit times
-	goto	ToZero2		;036 cycles, 2.20 bit times
+	goto	RcTo0_2		;036 cycles, 2.20 bit times
 	btfss	PORTC,RC5	;037 cycles, 2.26 bit times
-	goto	ToZero2		;038 cycles, 2.33 bit times
+	goto	RcTo0_2		;038 cycles, 2.33 bit times
 	btfss	PORTC,RC5	;039 cycles, 2.39 bit times
-	goto	ToZero2		;040 cycles, 2.45 bit times
+	goto	RcTo0_2		;040 cycles, 2.45 bit times
 	btfss	PORTC,RC5	;041 cycles, 2.51 bit times
-	goto	ToZero1		;042 cycles, 2.57 bit times
+	goto	RcTo0_1		;042 cycles, 2.57 bit times
 	btfss	PORTC,RC5	;043 cycles, 2.63 bit times
-	goto	ToZero1		;044 cycles, 2.69 bit times
+	goto	RcTo0_1		;044 cycles, 2.69 bit times
 	btfss	PORTC,RC5	;045 cycles, 2.75 bit times
-	goto	ToZero1		;046 cycles, 2.82 bit times
+	goto	RcTo0_1		;046 cycles, 2.82 bit times
 	btfss	PORTC,RC5	;047 cycles, 2.88 bit times
-	goto	ToZero1		;048 cycles, 2.94 bit times
+	goto	RcTo0_1		;048 cycles, 2.94 bit times
 	btfss	PORTC,RC5	;049 cycles, 3.00 bit times
-	goto	ToZero1		;050 cycles, 3.06 bit times
+	goto	RcTo0_1		;050 cycles, 3.06 bit times
 	btfss	PORTC,RC5	;051 cycles, 3.12 bit times
-	goto	ToZero1		;052 cycles, 3.18 bit times
+	goto	RcTo0_1		;052 cycles, 3.18 bit times
 	btfss	PORTC,RC5	;053 cycles, 3.24 bit times
-	goto	ToZero1		;054 cycles, 3.30 bit times
+	goto	RcTo0_1		;054 cycles, 3.30 bit times
 	btfss	PORTC,RC5	;055 cycles, 3.37 bit times
-	goto	ToZero1		;056 cycles, 3.43 bit times
+	goto	RcTo0_1		;056 cycles, 3.43 bit times
 	btfss	PORTC,RC5	;057 cycles, 3.49 bit times
-	goto	ToZero1		;058 cycles, 3.55 bit times
+	goto	RcTo0_1		;058 cycles, 3.55 bit times
 	btfss	PORTC,RC5	;059 cycles, 3.61 bit times
-	goto	ToZero0		;060 cycles, 3.67 bit times
+	goto	RcTo0_0		;060 cycles, 3.67 bit times
 	btfss	PORTC,RC5	;061 cycles, 3.73 bit times
-	goto	ToZero0		;062 cycles, 3.79 bit times
+	goto	RcTo0_0		;062 cycles, 3.79 bit times
 	btfss	PORTC,RC5	;063 cycles, 3.86 bit times
-	goto	ToZero0		;064 cycles, 3.92 bit times
+	goto	RcTo0_0		;064 cycles, 3.92 bit times
 	btfss	PORTC,RC5	;065 cycles, 3.98 bit times
-	goto	ToZero0		;066 cycles, 4.04 bit times
+	goto	RcTo0_0		;066 cycles, 4.04 bit times
 	btfss	PORTC,RC5	;067 cycles, 4.10 bit times
-	goto	ToZero0		;068 cycles, 4.16 bit times
+	goto	RcTo0_0		;068 cycles, 4.16 bit times
 	btfss	PORTC,RC5	;069 cycles, 4.22 bit times
-	goto	ToZero0		;070 cycles, 4.28 bit times
+	goto	RcTo0_0		;070 cycles, 4.28 bit times
 	btfss	PORTC,RC5	;071 cycles, 4.35 bit times
-	goto	ToZero0		;072 cycles, 4.41 bit times
+	goto	RcTo0_0		;072 cycles, 4.41 bit times
 	btfss	PORTC,RC5	;073 cycles, 4.47 bit times
-	goto	ToZero0		;074 cycles, 4.53 bit times
-	moviw	FSR0++		;075 cycles, 4.59 bit times
-	goto	StOne		;076 cycles, 4.65 bit times
+	goto	RcTo0_0		;074 cycles, 4.53 bit times
+	btfss	PORTA,RA1	;075 cycles, 4.59 bit times
+	bcf	INDF0,7		;076 cycles, 4.65 bit times
+	moviw	FSR0++		;077 cycles, 4.71 bit times
+	goto	RcSt1		;078 cycles, 4.77 bit times
 
-ToOne3	movlw	B'00001000'	;003 cycles, 0.18 bit times
+RcTo1_3	movlw	B'00001000'	;003 cycles, 0.18 bit times
 	iorwf	INDF0,F		;004 cycles, 0.24 bit times
-	DNOP			;005-006 cycles, 0.31-0.37 bit times
+	btfss	PORTA,RA1	;005 cycles, 0.31 bit times
+	bcf	INDF0,7		;006 cycles, 0.37 bit times
 	DNOP			;007-008 cycles, 0.43-0.49 bit times
 	btfss	PORTC,RC5	;009 cycles, 0.55 bit times
-	goto	ToZero2		;010 cycles, 0.61 bit times
+	goto	RcTo0_2		;010 cycles, 0.61 bit times
 	btfss	PORTC,RC5	;011 cycles, 0.67 bit times
-	goto	ToZero2		;012 cycles, 0.73 bit times
+	goto	RcTo0_2		;012 cycles, 0.73 bit times
 	btfss	PORTC,RC5	;013 cycles, 0.80 bit times
-	goto	ToZero2		;014 cycles, 0.86 bit times
+	goto	RcTo0_2		;014 cycles, 0.86 bit times
 	btfss	PORTC,RC5	;015 cycles, 0.92 bit times
-	goto	ToZero2		;016 cycles, 0.98 bit times
+	goto	RcTo0_2		;016 cycles, 0.98 bit times
 	btfss	PORTC,RC5	;017 cycles, 1.04 bit times
-	goto	ToZero2		;018 cycles, 1.10 bit times
+	goto	RcTo0_2		;018 cycles, 1.10 bit times
 	btfss	PORTC,RC5	;019 cycles, 1.16 bit times
-	goto	ToZero2		;020 cycles, 1.22 bit times
+	goto	RcTo0_2		;020 cycles, 1.22 bit times
 	btfss	PORTC,RC5	;021 cycles, 1.29 bit times
-	goto	ToZero2		;022 cycles, 1.35 bit times
+	goto	RcTo0_2		;022 cycles, 1.35 bit times
 	btfss	PORTC,RC5	;023 cycles, 1.41 bit times
-	goto	ToZero2		;024 cycles, 1.47 bit times
+	goto	RcTo0_2		;024 cycles, 1.47 bit times
 	btfss	PORTC,RC5	;025 cycles, 1.53 bit times
-	goto	ToZero1		;026 cycles, 1.59 bit times
+	goto	RcTo0_1		;026 cycles, 1.59 bit times
 	btfss	PORTC,RC5	;027 cycles, 1.65 bit times
-	goto	ToZero1		;028 cycles, 1.71 bit times
+	goto	RcTo0_1		;028 cycles, 1.71 bit times
 	btfss	PORTC,RC5	;029 cycles, 1.77 bit times
-	goto	ToZero1		;030 cycles, 1.84 bit times
+	goto	RcTo0_1		;030 cycles, 1.84 bit times
 	btfss	PORTC,RC5	;031 cycles, 1.90 bit times
-	goto	ToZero1		;032 cycles, 1.96 bit times
+	goto	RcTo0_1		;032 cycles, 1.96 bit times
 	btfss	PORTC,RC5	;033 cycles, 2.02 bit times
-	goto	ToZero1		;034 cycles, 2.08 bit times
+	goto	RcTo0_1		;034 cycles, 2.08 bit times
 	btfss	PORTC,RC5	;035 cycles, 2.14 bit times
-	goto	ToZero1		;036 cycles, 2.20 bit times
+	goto	RcTo0_1		;036 cycles, 2.20 bit times
 	btfss	PORTC,RC5	;037 cycles, 2.26 bit times
-	goto	ToZero1		;038 cycles, 2.33 bit times
+	goto	RcTo0_1		;038 cycles, 2.33 bit times
 	btfss	PORTC,RC5	;039 cycles, 2.39 bit times
-	goto	ToZero1		;040 cycles, 2.45 bit times
+	goto	RcTo0_1		;040 cycles, 2.45 bit times
 	btfss	PORTC,RC5	;041 cycles, 2.51 bit times
-	goto	ToZero0		;042 cycles, 2.57 bit times
+	goto	RcTo0_0		;042 cycles, 2.57 bit times
 	btfss	PORTC,RC5	;043 cycles, 2.63 bit times
-	goto	ToZero0		;044 cycles, 2.69 bit times
+	goto	RcTo0_0		;044 cycles, 2.69 bit times
 	btfss	PORTC,RC5	;045 cycles, 2.75 bit times
-	goto	ToZero0		;046 cycles, 2.82 bit times
+	goto	RcTo0_0		;046 cycles, 2.82 bit times
 	btfss	PORTC,RC5	;047 cycles, 2.88 bit times
-	goto	ToZero0		;048 cycles, 2.94 bit times
+	goto	RcTo0_0		;048 cycles, 2.94 bit times
 	btfss	PORTC,RC5	;049 cycles, 3.00 bit times
-	goto	ToZero0		;050 cycles, 3.06 bit times
+	goto	RcTo0_0		;050 cycles, 3.06 bit times
 	btfss	PORTC,RC5	;051 cycles, 3.12 bit times
-	goto	ToZero0		;052 cycles, 3.18 bit times
+	goto	RcTo0_0		;052 cycles, 3.18 bit times
 	btfss	PORTC,RC5	;053 cycles, 3.24 bit times
-	goto	ToZero0		;054 cycles, 3.30 bit times
+	goto	RcTo0_0		;054 cycles, 3.30 bit times
 	btfss	PORTC,RC5	;055 cycles, 3.37 bit times
-	goto	ToZero0		;056 cycles, 3.43 bit times
+	goto	RcTo0_0		;056 cycles, 3.43 bit times
 	btfss	PORTC,RC5	;057 cycles, 3.49 bit times
-	goto	ToZero0		;058 cycles, 3.55 bit times
-	moviw	FSR0++		;059 cycles, 3.61 bit times
-	goto	StOne		;060 cycles, 3.67 bit times
+	goto	RcTo0_0		;058 cycles, 3.55 bit times
+	btfss	PORTA,RA1	;059 cycles, 3.61 bit times
+	bcf	INDF0,7		;060 cycles, 3.67 bit times
+	moviw	FSR0++		;061 cycles, 3.73 bit times
+	goto	RcSt1		;062 cycles, 3.79 bit times
 
-ToOne2	movlw	B'00000100'	;003 cycles, 0.18 bit times
+RcTo1_2	movlw	B'00000100'	;003 cycles, 0.18 bit times
 	iorwf	INDF0,F		;004 cycles, 0.24 bit times
-	DNOP			;005-006 cycles, 0.31-0.37 bit times
+	btfss	PORTA,RA1	;005 cycles, 0.31 bit times
+	bcf	INDF0,7		;006 cycles, 0.37 bit times
 	DNOP			;007-008 cycles, 0.43-0.49 bit times
 	btfss	PORTC,RC5	;009 cycles, 0.55 bit times
-	goto	ToZero1		;010 cycles, 0.61 bit times
+	goto	RcTo0_1		;010 cycles, 0.61 bit times
 	btfss	PORTC,RC5	;011 cycles, 0.67 bit times
-	goto	ToZero1		;012 cycles, 0.73 bit times
+	goto	RcTo0_1		;012 cycles, 0.73 bit times
 	btfss	PORTC,RC5	;013 cycles, 0.80 bit times
-	goto	ToZero1		;014 cycles, 0.86 bit times
+	goto	RcTo0_1		;014 cycles, 0.86 bit times
 	btfss	PORTC,RC5	;015 cycles, 0.92 bit times
-	goto	ToZero1		;016 cycles, 0.98 bit times
+	goto	RcTo0_1		;016 cycles, 0.98 bit times
 	btfss	PORTC,RC5	;017 cycles, 1.04 bit times
-	goto	ToZero1		;018 cycles, 1.10 bit times
+	goto	RcTo0_1		;018 cycles, 1.10 bit times
 	btfss	PORTC,RC5	;019 cycles, 1.16 bit times
-	goto	ToZero1		;020 cycles, 1.22 bit times
+	goto	RcTo0_1		;020 cycles, 1.22 bit times
 	btfss	PORTC,RC5	;021 cycles, 1.29 bit times
-	goto	ToZero1		;022 cycles, 1.35 bit times
+	goto	RcTo0_1		;022 cycles, 1.35 bit times
 	btfss	PORTC,RC5	;023 cycles, 1.41 bit times
-	goto	ToZero1		;024 cycles, 1.47 bit times
+	goto	RcTo0_1		;024 cycles, 1.47 bit times
 	btfss	PORTC,RC5	;025 cycles, 1.53 bit times
-	goto	ToZero0		;026 cycles, 1.59 bit times
+	goto	RcTo0_0		;026 cycles, 1.59 bit times
 	btfss	PORTC,RC5	;027 cycles, 1.65 bit times
-	goto	ToZero0		;028 cycles, 1.71 bit times
+	goto	RcTo0_0		;028 cycles, 1.71 bit times
 	btfss	PORTC,RC5	;029 cycles, 1.77 bit times
-	goto	ToZero0		;030 cycles, 1.84 bit times
+	goto	RcTo0_0		;030 cycles, 1.84 bit times
 	btfss	PORTC,RC5	;031 cycles, 1.90 bit times
-	goto	ToZero0		;032 cycles, 1.96 bit times
+	goto	RcTo0_0		;032 cycles, 1.96 bit times
 	btfss	PORTC,RC5	;033 cycles, 2.02 bit times
-	goto	ToZero0		;034 cycles, 2.08 bit times
+	goto	RcTo0_0		;034 cycles, 2.08 bit times
 	btfss	PORTC,RC5	;035 cycles, 2.14 bit times
-	goto	ToZero0		;036 cycles, 2.20 bit times
+	goto	RcTo0_0		;036 cycles, 2.20 bit times
 	btfss	PORTC,RC5	;037 cycles, 2.26 bit times
-	goto	ToZero0		;038 cycles, 2.33 bit times
+	goto	RcTo0_0		;038 cycles, 2.33 bit times
 	btfss	PORTC,RC5	;039 cycles, 2.39 bit times
-	goto	ToZero0		;040 cycles, 2.45 bit times
-	moviw	FSR0++		;041 cycles, 2.51 bit times
-	goto	StOne		;042 cycles, 2.57 bit times
+	goto	RcTo0_0		;040 cycles, 2.45 bit times
+	btfss	PORTA,RA1	;041 cycles, 2.51 bit times
+	bcf	INDF0,7		;042 cycles, 2.57 bit times
+	moviw	FSR0++		;043 cycles, 2.63 bit times
+	goto	RcSt1		;044 cycles, 2.69 bit times
 
-ToOne1	movlw	B'00000010'	;003 cycles, 0.18 bit times
+RcTo1_1	movlw	B'00000010'	;003 cycles, 0.18 bit times
 	iorwf	INDF0,F		;004 cycles, 0.24 bit times
-	DNOP			;005-006 cycles, 0.31-0.37 bit times
+	btfss	PORTA,RA1	;005 cycles, 0.31 bit times
+	bcf	INDF0,7		;006 cycles, 0.37 bit times
 	DNOP			;007-008 cycles, 0.43-0.49 bit times
 	btfss	PORTC,RC5	;009 cycles, 0.55 bit times
-	goto	ToZero0		;010 cycles, 0.61 bit times
+	goto	RcTo0_0		;010 cycles, 0.61 bit times
 	btfss	PORTC,RC5	;011 cycles, 0.67 bit times
-	goto	ToZero0		;012 cycles, 0.73 bit times
+	goto	RcTo0_0		;012 cycles, 0.73 bit times
 	btfss	PORTC,RC5	;013 cycles, 0.80 bit times
-	goto	ToZero0		;014 cycles, 0.86 bit times
+	goto	RcTo0_0		;014 cycles, 0.86 bit times
 	btfss	PORTC,RC5	;015 cycles, 0.92 bit times
-	goto	ToZero0		;016 cycles, 0.98 bit times
+	goto	RcTo0_0		;016 cycles, 0.98 bit times
 	btfss	PORTC,RC5	;017 cycles, 1.04 bit times
-	goto	ToZero0		;018 cycles, 1.10 bit times
+	goto	RcTo0_0		;018 cycles, 1.10 bit times
 	btfss	PORTC,RC5	;019 cycles, 1.16 bit times
-	goto	ToZero0		;020 cycles, 1.22 bit times
+	goto	RcTo0_0		;020 cycles, 1.22 bit times
 	btfss	PORTC,RC5	;021 cycles, 1.29 bit times
-	goto	ToZero0		;022 cycles, 1.35 bit times
+	goto	RcTo0_0		;022 cycles, 1.35 bit times
 	btfss	PORTC,RC5	;023 cycles, 1.41 bit times
-	goto	ToZero0		;024 cycles, 1.47 bit times
-	moviw	FSR0++		;025 cycles, 1.53 bit times
-	goto	StOne		;026 cycles, 1.59 bit times
+	goto	RcTo0_0		;024 cycles, 1.47 bit times
+	btfss	PORTA,RA1	;025 cycles, 1.53 bit times
+	bcf	INDF0,7		;026 cycles, 1.59 bit times
+	moviw	FSR0++		;027 cycles, 1.65 bit times
+	goto	RcSt1		;028 cycles, 1.71 bit times
 
-ToOne0	movlw	B'00000001'	;003 cycles, 0.18 bit times
+RcTo1_0	movlw	B'00000001'	;003 cycles, 0.18 bit times
 	iorwf	INDF0,F		;004 cycles, 0.24 bit times
-	moviw	FSR0++		;005 cycles, 0.31 bit times
+	btfss	PORTA,RA1	;005 cycles, 0.31 bit times
+	bcf	INDF0,7		;006 cycles, 0.37 bit times
+	moviw	FSR0++		;007 cycles, 0.43 bit times
 	;fall through
 	
-StOne	btfsc	PORTC,RC5	;Signal starts at one, wait until transition
+RcSt1	btfsc	PORTC,RC5	;Signal starts at one, wait until transition
 	bra	$-1		; to zero, this is MSB (always 1) of first byte
 	movlw	B'10000000'	;003 cycles, 0.18 bit times
 	movwf	INDF0		;004 cycles, 0.24 bit times
-	DNOP			;005-006 cycles, 0.31-0.37 bit times
+	btfss	PORTA,RA1	;005 cycles, 0.31 bit times
+	bcf	INDF0,7		;006 cycles, 0.37 bit times
 	DNOP			;007-008 cycles, 0.43-0.49 bit times
 	btfsc	PORTC,RC5	;009 cycles, 0.55 bit times
-	goto	ToOne6		;010 cycles, 0.61 bit times
+	goto	RcTo1_6		;010 cycles, 0.61 bit times
 	btfsc	PORTC,RC5	;011 cycles, 0.67 bit times
-	goto	ToOne6		;012 cycles, 0.73 bit times
+	goto	RcTo1_6		;012 cycles, 0.73 bit times
 	btfsc	PORTC,RC5	;013 cycles, 0.80 bit times
-	goto	ToOne6		;014 cycles, 0.86 bit times
+	goto	RcTo1_6		;014 cycles, 0.86 bit times
 	btfsc	PORTC,RC5	;015 cycles, 0.92 bit times
-	goto	ToOne6		;016 cycles, 0.98 bit times
+	goto	RcTo1_6		;016 cycles, 0.98 bit times
 	btfsc	PORTC,RC5	;017 cycles, 1.04 bit times
-	goto	ToOne6		;018 cycles, 1.10 bit times
+	goto	RcTo1_6		;018 cycles, 1.10 bit times
 	btfsc	PORTC,RC5	;019 cycles, 1.16 bit times
-	goto	ToOne6		;020 cycles, 1.22 bit times
+	goto	RcTo1_6		;020 cycles, 1.22 bit times
 	btfsc	PORTC,RC5	;021 cycles, 1.29 bit times
-	goto	ToOne6		;022 cycles, 1.35 bit times
+	goto	RcTo1_6		;022 cycles, 1.35 bit times
 	btfsc	PORTC,RC5	;023 cycles, 1.41 bit times
-	goto	ToOne6		;024 cycles, 1.47 bit times
+	goto	RcTo1_6		;024 cycles, 1.47 bit times
 	btfsc	PORTC,RC5	;025 cycles, 1.53 bit times
-	goto	ToOne5		;026 cycles, 1.59 bit times
+	goto	RcTo1_5		;026 cycles, 1.59 bit times
 	btfsc	PORTC,RC5	;027 cycles, 1.65 bit times
-	goto	ToOne5		;028 cycles, 1.71 bit times
+	goto	RcTo1_5		;028 cycles, 1.71 bit times
 	btfsc	PORTC,RC5	;029 cycles, 1.77 bit times
-	goto	ToOne5		;030 cycles, 1.84 bit times
+	goto	RcTo1_5		;030 cycles, 1.84 bit times
 	btfsc	PORTC,RC5	;031 cycles, 1.90 bit times
-	goto	ToOne5		;032 cycles, 1.96 bit times
+	goto	RcTo1_5		;032 cycles, 1.96 bit times
 	btfsc	PORTC,RC5	;033 cycles, 2.02 bit times
-	goto	ToOne5		;034 cycles, 2.08 bit times
+	goto	RcTo1_5		;034 cycles, 2.08 bit times
 	btfsc	PORTC,RC5	;035 cycles, 2.14 bit times
-	goto	ToOne5		;036 cycles, 2.20 bit times
+	goto	RcTo1_5		;036 cycles, 2.20 bit times
 	btfsc	PORTC,RC5	;037 cycles, 2.26 bit times
-	goto	ToOne5		;038 cycles, 2.33 bit times
+	goto	RcTo1_5		;038 cycles, 2.33 bit times
 	btfsc	PORTC,RC5	;039 cycles, 2.39 bit times
-	goto	ToOne5		;040 cycles, 2.45 bit times
+	goto	RcTo1_5		;040 cycles, 2.45 bit times
 	btfsc	PORTC,RC5	;041 cycles, 2.51 bit times
-	goto	ToOne4		;042 cycles, 2.57 bit times
+	goto	RcTo1_4		;042 cycles, 2.57 bit times
 	btfsc	PORTC,RC5	;043 cycles, 2.63 bit times
-	goto	ToOne4		;044 cycles, 2.69 bit times
+	goto	RcTo1_4		;044 cycles, 2.69 bit times
 	btfsc	PORTC,RC5	;045 cycles, 2.75 bit times
-	goto	ToOne4		;046 cycles, 2.82 bit times
+	goto	RcTo1_4		;046 cycles, 2.82 bit times
 	btfsc	PORTC,RC5	;047 cycles, 2.88 bit times
-	goto	ToOne4		;048 cycles, 2.94 bit times
+	goto	RcTo1_4		;048 cycles, 2.94 bit times
 	btfsc	PORTC,RC5	;049 cycles, 3.00 bit times
-	goto	ToOne4		;050 cycles, 3.06 bit times
+	goto	RcTo1_4		;050 cycles, 3.06 bit times
 	btfsc	PORTC,RC5	;051 cycles, 3.12 bit times
-	goto	ToOne4		;052 cycles, 3.18 bit times
+	goto	RcTo1_4		;052 cycles, 3.18 bit times
 	btfsc	PORTC,RC5	;053 cycles, 3.24 bit times
-	goto	ToOne4		;054 cycles, 3.30 bit times
+	goto	RcTo1_4		;054 cycles, 3.30 bit times
 	btfsc	PORTC,RC5	;055 cycles, 3.37 bit times
-	goto	ToOne4		;056 cycles, 3.43 bit times
+	goto	RcTo1_4		;056 cycles, 3.43 bit times
 	btfsc	PORTC,RC5	;057 cycles, 3.49 bit times
-	goto	ToOne4		;058 cycles, 3.55 bit times
+	goto	RcTo1_4		;058 cycles, 3.55 bit times
 	btfsc	PORTC,RC5	;059 cycles, 3.61 bit times
-	goto	ToOne3		;060 cycles, 3.67 bit times
+	goto	RcTo1_3		;060 cycles, 3.67 bit times
 	btfsc	PORTC,RC5	;061 cycles, 3.73 bit times
-	goto	ToOne3		;062 cycles, 3.79 bit times
+	goto	RcTo1_3		;062 cycles, 3.79 bit times
 	btfsc	PORTC,RC5	;063 cycles, 3.86 bit times
-	goto	ToOne3		;064 cycles, 3.92 bit times
+	goto	RcTo1_3		;064 cycles, 3.92 bit times
 	btfsc	PORTC,RC5	;065 cycles, 3.98 bit times
-	goto	ToOne3		;066 cycles, 4.04 bit times
+	goto	RcTo1_3		;066 cycles, 4.04 bit times
 	btfsc	PORTC,RC5	;067 cycles, 4.10 bit times
-	goto	ToOne3		;068 cycles, 4.16 bit times
+	goto	RcTo1_3		;068 cycles, 4.16 bit times
 	btfsc	PORTC,RC5	;069 cycles, 4.22 bit times
-	goto	ToOne3		;070 cycles, 4.28 bit times
+	goto	RcTo1_3		;070 cycles, 4.28 bit times
 	btfsc	PORTC,RC5	;071 cycles, 4.35 bit times
-	goto	ToOne3		;072 cycles, 4.41 bit times
+	goto	RcTo1_3		;072 cycles, 4.41 bit times
 	btfsc	PORTC,RC5	;073 cycles, 4.47 bit times
-	goto	ToOne3		;074 cycles, 4.53 bit times
+	goto	RcTo1_3		;074 cycles, 4.53 bit times
 	btfsc	PORTC,RC5	;075 cycles, 4.59 bit times
-	goto	ToOne2		;076 cycles, 4.65 bit times
+	goto	RcTo1_2		;076 cycles, 4.65 bit times
 	btfsc	PORTC,RC5	;077 cycles, 4.71 bit times
-	goto	ToOne2		;078 cycles, 4.77 bit times
+	goto	RcTo1_2		;078 cycles, 4.77 bit times
 	btfsc	PORTC,RC5	;079 cycles, 4.83 bit times
-	goto	ToOne2		;080 cycles, 4.90 bit times
+	goto	RcTo1_2		;080 cycles, 4.90 bit times
 	btfsc	PORTC,RC5	;081 cycles, 4.96 bit times
-	goto	ToOne2		;082 cycles, 5.02 bit times
+	goto	RcTo1_2		;082 cycles, 5.02 bit times
 	btfsc	PORTC,RC5	;083 cycles, 5.08 bit times
-	goto	ToOne2		;084 cycles, 5.14 bit times
+	goto	RcTo1_2		;084 cycles, 5.14 bit times
 	btfsc	PORTC,RC5	;085 cycles, 5.20 bit times
-	goto	ToOne2		;086 cycles, 5.26 bit times
+	goto	RcTo1_2		;086 cycles, 5.26 bit times
 	btfsc	PORTC,RC5	;087 cycles, 5.32 bit times
-	goto	ToOne2		;088 cycles, 5.39 bit times
+	goto	RcTo1_2		;088 cycles, 5.39 bit times
 	btfsc	PORTC,RC5	;089 cycles, 5.45 bit times
-	goto	ToOne2		;090 cycles, 5.51 bit times
+	goto	RcTo1_2		;090 cycles, 5.51 bit times
 	btfsc	PORTC,RC5	;091 cycles, 5.57 bit times
-	goto	ToOne1		;092 cycles, 5.63 bit times
+	goto	RcTo1_1		;092 cycles, 5.63 bit times
 	btfsc	PORTC,RC5	;093 cycles, 5.69 bit times
-	goto	ToOne1		;094 cycles, 5.75 bit times
+	goto	RcTo1_1		;094 cycles, 5.75 bit times
 	btfsc	PORTC,RC5	;095 cycles, 5.81 bit times
-	goto	ToOne1		;096 cycles, 5.88 bit times
+	goto	RcTo1_1		;096 cycles, 5.88 bit times
 	btfsc	PORTC,RC5	;097 cycles, 5.94 bit times
-	goto	ToOne1		;098 cycles, 6.00 bit times
+	goto	RcTo1_1		;098 cycles, 6.00 bit times
 	btfsc	PORTC,RC5	;099 cycles, 6.06 bit times
-	goto	ToOne1		;100 cycles, 6.12 bit times
+	goto	RcTo1_1		;100 cycles, 6.12 bit times
 	btfsc	PORTC,RC5	;101 cycles, 6.18 bit times
-	goto	ToOne1		;102 cycles, 6.24 bit times
+	goto	RcTo1_1		;102 cycles, 6.24 bit times
 	btfsc	PORTC,RC5	;103 cycles, 6.30 bit times
-	goto	ToOne1		;104 cycles, 6.36 bit times
+	goto	RcTo1_1		;104 cycles, 6.36 bit times
 	btfsc	PORTC,RC5	;105 cycles, 6.43 bit times
-	goto	ToOne1		;106 cycles, 6.49 bit times
+	goto	RcTo1_1		;106 cycles, 6.49 bit times
 	btfsc	PORTC,RC5	;107 cycles, 6.55 bit times
-	goto	ToOne0		;108 cycles, 6.61 bit times
+	goto	RcTo1_0		;108 cycles, 6.61 bit times
 	btfsc	PORTC,RC5	;109 cycles, 6.67 bit times
-	goto	ToOne0		;110 cycles, 6.73 bit times
+	goto	RcTo1_0		;110 cycles, 6.73 bit times
 	btfsc	PORTC,RC5	;111 cycles, 6.79 bit times
-	goto	ToOne0		;112 cycles, 6.85 bit times
+	goto	RcTo1_0		;112 cycles, 6.85 bit times
 	btfsc	PORTC,RC5	;113 cycles, 6.92 bit times
-	goto	ToOne0		;114 cycles, 6.98 bit times
+	goto	RcTo1_0		;114 cycles, 6.98 bit times
 	btfsc	PORTC,RC5	;115 cycles, 7.04 bit times
-	goto	ToOne0		;116 cycles, 7.10 bit times
+	goto	RcTo1_0		;116 cycles, 7.10 bit times
 	btfsc	PORTC,RC5	;117 cycles, 7.16 bit times
-	goto	ToOne0		;118 cycles, 7.22 bit times
+	goto	RcTo1_0		;118 cycles, 7.22 bit times
 	btfsc	PORTC,RC5	;119 cycles, 7.28 bit times
-	goto	ToOne0		;120 cycles, 7.34 bit times
+	goto	RcTo1_0		;120 cycles, 7.34 bit times
 	btfsc	PORTC,RC5	;121 cycles, 7.40 bit times
-	goto	ToOne0		;122 cycles, 7.47 bit times
-	moviw	FSR0++		;123 cycles, 7.53 bit times
-	goto	StZero		;124 cycles, 7.59 bit times
+	goto	RcTo1_0		;122 cycles, 7.47 bit times
+	btfss	PORTA,RA1	;123 cycles, 7.53 bit times
+	bcf	INDF0,7		;124 cycles, 7.59 bit times
+	moviw	FSR0++		;125 cycles, 7.65 bit times
+	goto	RcSt0		;126 cycles, 7.71 bit times
 
-ToZero6	movlw	B'01000000'	;003 cycles, 0.18 bit times
+RcTo0_6	movlw	B'01000000'	;003 cycles, 0.18 bit times
 	iorwf	INDF0,F		;004 cycles, 0.24 bit times
-	DNOP			;005-006 cycles, 0.31-0.37 bit times
+	btfss	PORTA,RA1	;005 cycles, 0.31 bit times
+	bcf	INDF0,7		;006 cycles, 0.37 bit times
 	DNOP			;007-008 cycles, 0.43-0.49 bit times
 	btfsc	PORTC,RC5	;009 cycles, 0.55 bit times
-	goto	ToOne5		;010 cycles, 0.61 bit times
+	goto	RcTo1_5		;010 cycles, 0.61 bit times
 	btfsc	PORTC,RC5	;011 cycles, 0.67 bit times
-	goto	ToOne5		;012 cycles, 0.73 bit times
+	goto	RcTo1_5		;012 cycles, 0.73 bit times
 	btfsc	PORTC,RC5	;013 cycles, 0.80 bit times
-	goto	ToOne5		;014 cycles, 0.86 bit times
+	goto	RcTo1_5		;014 cycles, 0.86 bit times
 	btfsc	PORTC,RC5	;015 cycles, 0.92 bit times
-	goto	ToOne5		;016 cycles, 0.98 bit times
+	goto	RcTo1_5		;016 cycles, 0.98 bit times
 	btfsc	PORTC,RC5	;017 cycles, 1.04 bit times
-	goto	ToOne5		;018 cycles, 1.10 bit times
+	goto	RcTo1_5		;018 cycles, 1.10 bit times
 	btfsc	PORTC,RC5	;019 cycles, 1.16 bit times
-	goto	ToOne5		;020 cycles, 1.22 bit times
+	goto	RcTo1_5		;020 cycles, 1.22 bit times
 	btfsc	PORTC,RC5	;021 cycles, 1.29 bit times
-	goto	ToOne5		;022 cycles, 1.35 bit times
+	goto	RcTo1_5		;022 cycles, 1.35 bit times
 	btfsc	PORTC,RC5	;023 cycles, 1.41 bit times
-	goto	ToOne5		;024 cycles, 1.47 bit times
+	goto	RcTo1_5		;024 cycles, 1.47 bit times
 	btfsc	PORTC,RC5	;025 cycles, 1.53 bit times
-	goto	ToOne4		;026 cycles, 1.59 bit times
+	goto	RcTo1_4		;026 cycles, 1.59 bit times
 	btfsc	PORTC,RC5	;027 cycles, 1.65 bit times
-	goto	ToOne4		;028 cycles, 1.71 bit times
+	goto	RcTo1_4		;028 cycles, 1.71 bit times
 	btfsc	PORTC,RC5	;029 cycles, 1.77 bit times
-	goto	ToOne4		;030 cycles, 1.84 bit times
+	goto	RcTo1_4		;030 cycles, 1.84 bit times
 	btfsc	PORTC,RC5	;031 cycles, 1.90 bit times
-	goto	ToOne4		;032 cycles, 1.96 bit times
+	goto	RcTo1_4		;032 cycles, 1.96 bit times
 	btfsc	PORTC,RC5	;033 cycles, 2.02 bit times
-	goto	ToOne4		;034 cycles, 2.08 bit times
+	goto	RcTo1_4		;034 cycles, 2.08 bit times
 	btfsc	PORTC,RC5	;035 cycles, 2.14 bit times
-	goto	ToOne4		;036 cycles, 2.20 bit times
+	goto	RcTo1_4		;036 cycles, 2.20 bit times
 	btfsc	PORTC,RC5	;037 cycles, 2.26 bit times
-	goto	ToOne4		;038 cycles, 2.33 bit times
+	goto	RcTo1_4		;038 cycles, 2.33 bit times
 	btfsc	PORTC,RC5	;039 cycles, 2.39 bit times
-	goto	ToOne4		;040 cycles, 2.45 bit times
+	goto	RcTo1_4		;040 cycles, 2.45 bit times
 	btfsc	PORTC,RC5	;041 cycles, 2.51 bit times
-	goto	ToOne3		;042 cycles, 2.57 bit times
+	goto	RcTo1_3		;042 cycles, 2.57 bit times
 	btfsc	PORTC,RC5	;043 cycles, 2.63 bit times
-	goto	ToOne3		;044 cycles, 2.69 bit times
+	goto	RcTo1_3		;044 cycles, 2.69 bit times
 	btfsc	PORTC,RC5	;045 cycles, 2.75 bit times
-	goto	ToOne3		;046 cycles, 2.82 bit times
+	goto	RcTo1_3		;046 cycles, 2.82 bit times
 	btfsc	PORTC,RC5	;047 cycles, 2.88 bit times
-	goto	ToOne3		;048 cycles, 2.94 bit times
+	goto	RcTo1_3		;048 cycles, 2.94 bit times
 	btfsc	PORTC,RC5	;049 cycles, 3.00 bit times
-	goto	ToOne3		;050 cycles, 3.06 bit times
+	goto	RcTo1_3		;050 cycles, 3.06 bit times
 	btfsc	PORTC,RC5	;051 cycles, 3.12 bit times
-	goto	ToOne3		;052 cycles, 3.18 bit times
+	goto	RcTo1_3		;052 cycles, 3.18 bit times
 	btfsc	PORTC,RC5	;053 cycles, 3.24 bit times
-	goto	ToOne3		;054 cycles, 3.30 bit times
+	goto	RcTo1_3		;054 cycles, 3.30 bit times
 	btfsc	PORTC,RC5	;055 cycles, 3.37 bit times
-	goto	ToOne3		;056 cycles, 3.43 bit times
+	goto	RcTo1_3		;056 cycles, 3.43 bit times
 	btfsc	PORTC,RC5	;057 cycles, 3.49 bit times
-	goto	ToOne3		;058 cycles, 3.55 bit times
+	goto	RcTo1_3		;058 cycles, 3.55 bit times
 	btfsc	PORTC,RC5	;059 cycles, 3.61 bit times
-	goto	ToOne2		;060 cycles, 3.67 bit times
+	goto	RcTo1_2		;060 cycles, 3.67 bit times
 	btfsc	PORTC,RC5	;061 cycles, 3.73 bit times
-	goto	ToOne2		;062 cycles, 3.79 bit times
+	goto	RcTo1_2		;062 cycles, 3.79 bit times
 	btfsc	PORTC,RC5	;063 cycles, 3.86 bit times
-	goto	ToOne2		;064 cycles, 3.92 bit times
+	goto	RcTo1_2		;064 cycles, 3.92 bit times
 	btfsc	PORTC,RC5	;065 cycles, 3.98 bit times
-	goto	ToOne2		;066 cycles, 4.04 bit times
+	goto	RcTo1_2		;066 cycles, 4.04 bit times
 	btfsc	PORTC,RC5	;067 cycles, 4.10 bit times
-	goto	ToOne2		;068 cycles, 4.16 bit times
+	goto	RcTo1_2		;068 cycles, 4.16 bit times
 	btfsc	PORTC,RC5	;069 cycles, 4.22 bit times
-	goto	ToOne2		;070 cycles, 4.28 bit times
+	goto	RcTo1_2		;070 cycles, 4.28 bit times
 	btfsc	PORTC,RC5	;071 cycles, 4.35 bit times
-	goto	ToOne2		;072 cycles, 4.41 bit times
+	goto	RcTo1_2		;072 cycles, 4.41 bit times
 	btfsc	PORTC,RC5	;073 cycles, 4.47 bit times
-	goto	ToOne2		;074 cycles, 4.53 bit times
+	goto	RcTo1_2		;074 cycles, 4.53 bit times
 	btfsc	PORTC,RC5	;075 cycles, 4.59 bit times
-	goto	ToOne1		;076 cycles, 4.65 bit times
+	goto	RcTo1_1		;076 cycles, 4.65 bit times
 	btfsc	PORTC,RC5	;077 cycles, 4.71 bit times
-	goto	ToOne1		;078 cycles, 4.77 bit times
+	goto	RcTo1_1		;078 cycles, 4.77 bit times
 	btfsc	PORTC,RC5	;079 cycles, 4.83 bit times
-	goto	ToOne1		;080 cycles, 4.90 bit times
+	goto	RcTo1_1		;080 cycles, 4.90 bit times
 	btfsc	PORTC,RC5	;081 cycles, 4.96 bit times
-	goto	ToOne1		;082 cycles, 5.02 bit times
+	goto	RcTo1_1		;082 cycles, 5.02 bit times
 	btfsc	PORTC,RC5	;083 cycles, 5.08 bit times
-	goto	ToOne1		;084 cycles, 5.14 bit times
+	goto	RcTo1_1		;084 cycles, 5.14 bit times
 	btfsc	PORTC,RC5	;085 cycles, 5.20 bit times
-	goto	ToOne1		;086 cycles, 5.26 bit times
+	goto	RcTo1_1		;086 cycles, 5.26 bit times
 	btfsc	PORTC,RC5	;087 cycles, 5.32 bit times
-	goto	ToOne1		;088 cycles, 5.39 bit times
+	goto	RcTo1_1		;088 cycles, 5.39 bit times
 	btfsc	PORTC,RC5	;089 cycles, 5.45 bit times
-	goto	ToOne1		;090 cycles, 5.51 bit times
+	goto	RcTo1_1		;090 cycles, 5.51 bit times
 	btfsc	PORTC,RC5	;091 cycles, 5.57 bit times
-	goto	ToOne0		;092 cycles, 5.63 bit times
+	goto	RcTo1_0		;092 cycles, 5.63 bit times
 	btfsc	PORTC,RC5	;093 cycles, 5.69 bit times
-	goto	ToOne0		;094 cycles, 5.75 bit times
+	goto	RcTo1_0		;094 cycles, 5.75 bit times
 	btfsc	PORTC,RC5	;095 cycles, 5.81 bit times
-	goto	ToOne0		;096 cycles, 5.88 bit times
+	goto	RcTo1_0		;096 cycles, 5.88 bit times
 	btfsc	PORTC,RC5	;097 cycles, 5.94 bit times
-	goto	ToOne0		;098 cycles, 6.00 bit times
+	goto	RcTo1_0		;098 cycles, 6.00 bit times
 	btfsc	PORTC,RC5	;099 cycles, 6.06 bit times
-	goto	ToOne0		;100 cycles, 6.12 bit times
+	goto	RcTo1_0		;100 cycles, 6.12 bit times
 	btfsc	PORTC,RC5	;101 cycles, 6.18 bit times
-	goto	ToOne0		;102 cycles, 6.24 bit times
+	goto	RcTo1_0		;102 cycles, 6.24 bit times
 	btfsc	PORTC,RC5	;103 cycles, 6.30 bit times
-	goto	ToOne0		;104 cycles, 6.36 bit times
+	goto	RcTo1_0		;104 cycles, 6.36 bit times
 	btfsc	PORTC,RC5	;105 cycles, 6.43 bit times
-	goto	ToOne0		;106 cycles, 6.49 bit times
-	moviw	FSR0++		;107 cycles, 6.55 bit times
-	goto	StZero		;108 cycles, 6.61 bit times
+	goto	RcTo1_0		;106 cycles, 6.49 bit times
+	btfss	PORTA,RA1	;107 cycles, 6.55 bit times
+	bcf	INDF0,7		;108 cycles, 6.61 bit times
+	moviw	FSR0++		;109 cycles, 6.67 bit times
+	goto	RcSt0		;110 cycles, 6.73 bit times
 
-ToZero5	movlw	B'00100000'	;003 cycles, 0.18 bit times
+RcTo0_5	movlw	B'00100000'	;003 cycles, 0.18 bit times
 	iorwf	INDF0,F		;004 cycles, 0.24 bit times
-	DNOP			;005-006 cycles, 0.31-0.37 bit times
+	btfss	PORTA,RA1	;005 cycles, 0.31 bit times
+	bcf	INDF0,7		;006 cycles, 0.37 bit times
 	DNOP			;007-008 cycles, 0.43-0.49 bit times
 	btfsc	PORTC,RC5	;009 cycles, 0.55 bit times
-	goto	ToOne4		;010 cycles, 0.61 bit times
+	goto	RcTo1_4		;010 cycles, 0.61 bit times
 	btfsc	PORTC,RC5	;011 cycles, 0.67 bit times
-	goto	ToOne4		;012 cycles, 0.73 bit times
+	goto	RcTo1_4		;012 cycles, 0.73 bit times
 	btfsc	PORTC,RC5	;013 cycles, 0.80 bit times
-	goto	ToOne4		;014 cycles, 0.86 bit times
+	goto	RcTo1_4		;014 cycles, 0.86 bit times
 	btfsc	PORTC,RC5	;015 cycles, 0.92 bit times
-	goto	ToOne4		;016 cycles, 0.98 bit times
+	goto	RcTo1_4		;016 cycles, 0.98 bit times
 	btfsc	PORTC,RC5	;017 cycles, 1.04 bit times
-	goto	ToOne4		;018 cycles, 1.10 bit times
+	goto	RcTo1_4		;018 cycles, 1.10 bit times
 	btfsc	PORTC,RC5	;019 cycles, 1.16 bit times
-	goto	ToOne4		;020 cycles, 1.22 bit times
+	goto	RcTo1_4		;020 cycles, 1.22 bit times
 	btfsc	PORTC,RC5	;021 cycles, 1.29 bit times
-	goto	ToOne4		;022 cycles, 1.35 bit times
+	goto	RcTo1_4		;022 cycles, 1.35 bit times
 	btfsc	PORTC,RC5	;023 cycles, 1.41 bit times
-	goto	ToOne4		;024 cycles, 1.47 bit times
+	goto	RcTo1_4		;024 cycles, 1.47 bit times
 	btfsc	PORTC,RC5	;025 cycles, 1.53 bit times
-	goto	ToOne3		;026 cycles, 1.59 bit times
+	goto	RcTo1_3		;026 cycles, 1.59 bit times
 	btfsc	PORTC,RC5	;027 cycles, 1.65 bit times
-	goto	ToOne3		;028 cycles, 1.71 bit times
+	goto	RcTo1_3		;028 cycles, 1.71 bit times
 	btfsc	PORTC,RC5	;029 cycles, 1.77 bit times
-	goto	ToOne3		;030 cycles, 1.84 bit times
+	goto	RcTo1_3		;030 cycles, 1.84 bit times
 	btfsc	PORTC,RC5	;031 cycles, 1.90 bit times
-	goto	ToOne3		;032 cycles, 1.96 bit times
+	goto	RcTo1_3		;032 cycles, 1.96 bit times
 	btfsc	PORTC,RC5	;033 cycles, 2.02 bit times
-	goto	ToOne3		;034 cycles, 2.08 bit times
+	goto	RcTo1_3		;034 cycles, 2.08 bit times
 	btfsc	PORTC,RC5	;035 cycles, 2.14 bit times
-	goto	ToOne3		;036 cycles, 2.20 bit times
+	goto	RcTo1_3		;036 cycles, 2.20 bit times
 	btfsc	PORTC,RC5	;037 cycles, 2.26 bit times
-	goto	ToOne3		;038 cycles, 2.33 bit times
+	goto	RcTo1_3		;038 cycles, 2.33 bit times
 	btfsc	PORTC,RC5	;039 cycles, 2.39 bit times
-	goto	ToOne3		;040 cycles, 2.45 bit times
+	goto	RcTo1_3		;040 cycles, 2.45 bit times
 	btfsc	PORTC,RC5	;041 cycles, 2.51 bit times
-	goto	ToOne2		;042 cycles, 2.57 bit times
+	goto	RcTo1_2		;042 cycles, 2.57 bit times
 	btfsc	PORTC,RC5	;043 cycles, 2.63 bit times
-	goto	ToOne2		;044 cycles, 2.69 bit times
+	goto	RcTo1_2		;044 cycles, 2.69 bit times
 	btfsc	PORTC,RC5	;045 cycles, 2.75 bit times
-	goto	ToOne2		;046 cycles, 2.82 bit times
+	goto	RcTo1_2		;046 cycles, 2.82 bit times
 	btfsc	PORTC,RC5	;047 cycles, 2.88 bit times
-	goto	ToOne2		;048 cycles, 2.94 bit times
+	goto	RcTo1_2		;048 cycles, 2.94 bit times
 	btfsc	PORTC,RC5	;049 cycles, 3.00 bit times
-	goto	ToOne2		;050 cycles, 3.06 bit times
+	goto	RcTo1_2		;050 cycles, 3.06 bit times
 	btfsc	PORTC,RC5	;051 cycles, 3.12 bit times
-	goto	ToOne2		;052 cycles, 3.18 bit times
+	goto	RcTo1_2		;052 cycles, 3.18 bit times
 	btfsc	PORTC,RC5	;053 cycles, 3.24 bit times
-	goto	ToOne2		;054 cycles, 3.30 bit times
+	goto	RcTo1_2		;054 cycles, 3.30 bit times
 	btfsc	PORTC,RC5	;055 cycles, 3.37 bit times
-	goto	ToOne2		;056 cycles, 3.43 bit times
+	goto	RcTo1_2		;056 cycles, 3.43 bit times
 	btfsc	PORTC,RC5	;057 cycles, 3.49 bit times
-	goto	ToOne2		;058 cycles, 3.55 bit times
+	goto	RcTo1_2		;058 cycles, 3.55 bit times
 	btfsc	PORTC,RC5	;059 cycles, 3.61 bit times
-	goto	ToOne1		;060 cycles, 3.67 bit times
+	goto	RcTo1_1		;060 cycles, 3.67 bit times
 	btfsc	PORTC,RC5	;061 cycles, 3.73 bit times
-	goto	ToOne1		;062 cycles, 3.79 bit times
+	goto	RcTo1_1		;062 cycles, 3.79 bit times
 	btfsc	PORTC,RC5	;063 cycles, 3.86 bit times
-	goto	ToOne1		;064 cycles, 3.92 bit times
+	goto	RcTo1_1		;064 cycles, 3.92 bit times
 	btfsc	PORTC,RC5	;065 cycles, 3.98 bit times
-	goto	ToOne1		;066 cycles, 4.04 bit times
+	goto	RcTo1_1		;066 cycles, 4.04 bit times
 	btfsc	PORTC,RC5	;067 cycles, 4.10 bit times
-	goto	ToOne1		;068 cycles, 4.16 bit times
+	goto	RcTo1_1		;068 cycles, 4.16 bit times
 	btfsc	PORTC,RC5	;069 cycles, 4.22 bit times
-	goto	ToOne1		;070 cycles, 4.28 bit times
+	goto	RcTo1_1		;070 cycles, 4.28 bit times
 	btfsc	PORTC,RC5	;071 cycles, 4.35 bit times
-	goto	ToOne1		;072 cycles, 4.41 bit times
+	goto	RcTo1_1		;072 cycles, 4.41 bit times
 	btfsc	PORTC,RC5	;073 cycles, 4.47 bit times
-	goto	ToOne1		;074 cycles, 4.53 bit times
+	goto	RcTo1_1		;074 cycles, 4.53 bit times
 	btfsc	PORTC,RC5	;075 cycles, 4.59 bit times
-	goto	ToOne0		;076 cycles, 4.65 bit times
+	goto	RcTo1_0		;076 cycles, 4.65 bit times
 	btfsc	PORTC,RC5	;077 cycles, 4.71 bit times
-	goto	ToOne0		;078 cycles, 4.77 bit times
+	goto	RcTo1_0		;078 cycles, 4.77 bit times
 	btfsc	PORTC,RC5	;079 cycles, 4.83 bit times
-	goto	ToOne0		;080 cycles, 4.90 bit times
+	goto	RcTo1_0		;080 cycles, 4.90 bit times
 	btfsc	PORTC,RC5	;081 cycles, 4.96 bit times
-	goto	ToOne0		;082 cycles, 5.02 bit times
+	goto	RcTo1_0		;082 cycles, 5.02 bit times
 	btfsc	PORTC,RC5	;083 cycles, 5.08 bit times
-	goto	ToOne0		;084 cycles, 5.14 bit times
+	goto	RcTo1_0		;084 cycles, 5.14 bit times
 	btfsc	PORTC,RC5	;085 cycles, 5.20 bit times
-	goto	ToOne0		;086 cycles, 5.26 bit times
+	goto	RcTo1_0		;086 cycles, 5.26 bit times
 	btfsc	PORTC,RC5	;087 cycles, 5.32 bit times
-	goto	ToOne0		;088 cycles, 5.39 bit times
+	goto	RcTo1_0		;088 cycles, 5.39 bit times
 	btfsc	PORTC,RC5	;089 cycles, 5.45 bit times
-	goto	ToOne0		;090 cycles, 5.51 bit times
-	moviw	FSR0++		;091 cycles, 5.57 bit times
-	goto	StZero		;092 cycles, 5.63 bit times
+	goto	RcTo1_0		;090 cycles, 5.51 bit times
+	btfss	PORTA,RA1	;091 cycles, 5.57 bit times
+	bcf	INDF0,7		;092 cycles, 5.63 bit times
+	moviw	FSR0++		;093 cycles, 5.69 bit times
+	goto	RcSt0		;094 cycles, 5.75 bit times
 
-ToZero4	movlw	B'00010000'	;003 cycles, 0.18 bit times
+RcTo0_4	movlw	B'00010000'	;003 cycles, 0.18 bit times
 	iorwf	INDF0,F		;004 cycles, 0.24 bit times
-	DNOP			;005-006 cycles, 0.31-0.37 bit times
+	btfss	PORTA,RA1	;005 cycles, 0.31 bit times
+	bcf	INDF0,7		;006 cycles, 0.37 bit times
 	DNOP			;007-008 cycles, 0.43-0.49 bit times
 	btfsc	PORTC,RC5	;009 cycles, 0.55 bit times
-	goto	ToOne3		;010 cycles, 0.61 bit times
+	goto	RcTo1_3		;010 cycles, 0.61 bit times
 	btfsc	PORTC,RC5	;011 cycles, 0.67 bit times
-	goto	ToOne3		;012 cycles, 0.73 bit times
+	goto	RcTo1_3		;012 cycles, 0.73 bit times
 	btfsc	PORTC,RC5	;013 cycles, 0.80 bit times
-	goto	ToOne3		;014 cycles, 0.86 bit times
+	goto	RcTo1_3		;014 cycles, 0.86 bit times
 	btfsc	PORTC,RC5	;015 cycles, 0.92 bit times
-	goto	ToOne3		;016 cycles, 0.98 bit times
+	goto	RcTo1_3		;016 cycles, 0.98 bit times
 	btfsc	PORTC,RC5	;017 cycles, 1.04 bit times
-	goto	ToOne3		;018 cycles, 1.10 bit times
+	goto	RcTo1_3		;018 cycles, 1.10 bit times
 	btfsc	PORTC,RC5	;019 cycles, 1.16 bit times
-	goto	ToOne3		;020 cycles, 1.22 bit times
+	goto	RcTo1_3		;020 cycles, 1.22 bit times
 	btfsc	PORTC,RC5	;021 cycles, 1.29 bit times
-	goto	ToOne3		;022 cycles, 1.35 bit times
+	goto	RcTo1_3		;022 cycles, 1.35 bit times
 	btfsc	PORTC,RC5	;023 cycles, 1.41 bit times
-	goto	ToOne3		;024 cycles, 1.47 bit times
+	goto	RcTo1_3		;024 cycles, 1.47 bit times
 	btfsc	PORTC,RC5	;025 cycles, 1.53 bit times
-	goto	ToOne2		;026 cycles, 1.59 bit times
+	goto	RcTo1_2		;026 cycles, 1.59 bit times
 	btfsc	PORTC,RC5	;027 cycles, 1.65 bit times
-	goto	ToOne2		;028 cycles, 1.71 bit times
+	goto	RcTo1_2		;028 cycles, 1.71 bit times
 	btfsc	PORTC,RC5	;029 cycles, 1.77 bit times
-	goto	ToOne2		;030 cycles, 1.84 bit times
+	goto	RcTo1_2		;030 cycles, 1.84 bit times
 	btfsc	PORTC,RC5	;031 cycles, 1.90 bit times
-	goto	ToOne2		;032 cycles, 1.96 bit times
+	goto	RcTo1_2		;032 cycles, 1.96 bit times
 	btfsc	PORTC,RC5	;033 cycles, 2.02 bit times
-	goto	ToOne2		;034 cycles, 2.08 bit times
+	goto	RcTo1_2		;034 cycles, 2.08 bit times
 	btfsc	PORTC,RC5	;035 cycles, 2.14 bit times
-	goto	ToOne2		;036 cycles, 2.20 bit times
+	goto	RcTo1_2		;036 cycles, 2.20 bit times
 	btfsc	PORTC,RC5	;037 cycles, 2.26 bit times
-	goto	ToOne2		;038 cycles, 2.33 bit times
+	goto	RcTo1_2		;038 cycles, 2.33 bit times
 	btfsc	PORTC,RC5	;039 cycles, 2.39 bit times
-	goto	ToOne2		;040 cycles, 2.45 bit times
+	goto	RcTo1_2		;040 cycles, 2.45 bit times
 	btfsc	PORTC,RC5	;041 cycles, 2.51 bit times
-	goto	ToOne1		;042 cycles, 2.57 bit times
+	goto	RcTo1_1		;042 cycles, 2.57 bit times
 	btfsc	PORTC,RC5	;043 cycles, 2.63 bit times
-	goto	ToOne1		;044 cycles, 2.69 bit times
+	goto	RcTo1_1		;044 cycles, 2.69 bit times
 	btfsc	PORTC,RC5	;045 cycles, 2.75 bit times
-	goto	ToOne1		;046 cycles, 2.82 bit times
+	goto	RcTo1_1		;046 cycles, 2.82 bit times
 	btfsc	PORTC,RC5	;047 cycles, 2.88 bit times
-	goto	ToOne1		;048 cycles, 2.94 bit times
+	goto	RcTo1_1		;048 cycles, 2.94 bit times
 	btfsc	PORTC,RC5	;049 cycles, 3.00 bit times
-	goto	ToOne1		;050 cycles, 3.06 bit times
+	goto	RcTo1_1		;050 cycles, 3.06 bit times
 	btfsc	PORTC,RC5	;051 cycles, 3.12 bit times
-	goto	ToOne1		;052 cycles, 3.18 bit times
+	goto	RcTo1_1		;052 cycles, 3.18 bit times
 	btfsc	PORTC,RC5	;053 cycles, 3.24 bit times
-	goto	ToOne1		;054 cycles, 3.30 bit times
+	goto	RcTo1_1		;054 cycles, 3.30 bit times
 	btfsc	PORTC,RC5	;055 cycles, 3.37 bit times
-	goto	ToOne1		;056 cycles, 3.43 bit times
+	goto	RcTo1_1		;056 cycles, 3.43 bit times
 	btfsc	PORTC,RC5	;057 cycles, 3.49 bit times
-	goto	ToOne1		;058 cycles, 3.55 bit times
+	goto	RcTo1_1		;058 cycles, 3.55 bit times
 	btfsc	PORTC,RC5	;059 cycles, 3.61 bit times
-	goto	ToOne0		;060 cycles, 3.67 bit times
+	goto	RcTo1_0		;060 cycles, 3.67 bit times
 	btfsc	PORTC,RC5	;061 cycles, 3.73 bit times
-	goto	ToOne0		;062 cycles, 3.79 bit times
+	goto	RcTo1_0		;062 cycles, 3.79 bit times
 	btfsc	PORTC,RC5	;063 cycles, 3.86 bit times
-	goto	ToOne0		;064 cycles, 3.92 bit times
+	goto	RcTo1_0		;064 cycles, 3.92 bit times
 	btfsc	PORTC,RC5	;065 cycles, 3.98 bit times
-	goto	ToOne0		;066 cycles, 4.04 bit times
+	goto	RcTo1_0		;066 cycles, 4.04 bit times
 	btfsc	PORTC,RC5	;067 cycles, 4.10 bit times
-	goto	ToOne0		;068 cycles, 4.16 bit times
+	goto	RcTo1_0		;068 cycles, 4.16 bit times
 	btfsc	PORTC,RC5	;069 cycles, 4.22 bit times
-	goto	ToOne0		;070 cycles, 4.28 bit times
+	goto	RcTo1_0		;070 cycles, 4.28 bit times
 	btfsc	PORTC,RC5	;071 cycles, 4.35 bit times
-	goto	ToOne0		;072 cycles, 4.41 bit times
+	goto	RcTo1_0		;072 cycles, 4.41 bit times
 	btfsc	PORTC,RC5	;073 cycles, 4.47 bit times
-	goto	ToOne0		;074 cycles, 4.53 bit times
-	moviw	FSR0++		;075 cycles, 4.59 bit times
-	goto	StZero		;076 cycles, 4.65 bit times
+	goto	RcTo1_0		;074 cycles, 4.53 bit times
+	btfss	PORTA,RA1	;075 cycles, 4.59 bit times
+	bcf	INDF0,7		;076 cycles, 4.65 bit times
+	moviw	FSR0++		;077 cycles, 4.71 bit times
+	goto	RcSt0		;078 cycles, 4.77 bit times
 
-ToZero3	movlw	B'00001000'	;003 cycles, 0.18 bit times
+RcTo0_3	movlw	B'00001000'	;003 cycles, 0.18 bit times
 	iorwf	INDF0,F		;004 cycles, 0.24 bit times
-	DNOP			;005-006 cycles, 0.31-0.37 bit times
+	btfss	PORTA,RA1	;005 cycles, 0.31 bit times
+	bcf	INDF0,7		;006 cycles, 0.37 bit times
 	DNOP			;007-008 cycles, 0.43-0.49 bit times
 	btfsc	PORTC,RC5	;009 cycles, 0.55 bit times
-	goto	ToOne2		;010 cycles, 0.61 bit times
+	goto	RcTo1_2		;010 cycles, 0.61 bit times
 	btfsc	PORTC,RC5	;011 cycles, 0.67 bit times
-	goto	ToOne2		;012 cycles, 0.73 bit times
+	goto	RcTo1_2		;012 cycles, 0.73 bit times
 	btfsc	PORTC,RC5	;013 cycles, 0.80 bit times
-	goto	ToOne2		;014 cycles, 0.86 bit times
+	goto	RcTo1_2		;014 cycles, 0.86 bit times
 	btfsc	PORTC,RC5	;015 cycles, 0.92 bit times
-	goto	ToOne2		;016 cycles, 0.98 bit times
+	goto	RcTo1_2		;016 cycles, 0.98 bit times
 	btfsc	PORTC,RC5	;017 cycles, 1.04 bit times
-	goto	ToOne2		;018 cycles, 1.10 bit times
+	goto	RcTo1_2		;018 cycles, 1.10 bit times
 	btfsc	PORTC,RC5	;019 cycles, 1.16 bit times
-	goto	ToOne2		;020 cycles, 1.22 bit times
+	goto	RcTo1_2		;020 cycles, 1.22 bit times
 	btfsc	PORTC,RC5	;021 cycles, 1.29 bit times
-	goto	ToOne2		;022 cycles, 1.35 bit times
+	goto	RcTo1_2		;022 cycles, 1.35 bit times
 	btfsc	PORTC,RC5	;023 cycles, 1.41 bit times
-	goto	ToOne2		;024 cycles, 1.47 bit times
+	goto	RcTo1_2		;024 cycles, 1.47 bit times
 	btfsc	PORTC,RC5	;025 cycles, 1.53 bit times
-	goto	ToOne1		;026 cycles, 1.59 bit times
+	goto	RcTo1_1		;026 cycles, 1.59 bit times
 	btfsc	PORTC,RC5	;027 cycles, 1.65 bit times
-	goto	ToOne1		;028 cycles, 1.71 bit times
+	goto	RcTo1_1		;028 cycles, 1.71 bit times
 	btfsc	PORTC,RC5	;029 cycles, 1.77 bit times
-	goto	ToOne1		;030 cycles, 1.84 bit times
+	goto	RcTo1_1		;030 cycles, 1.84 bit times
 	btfsc	PORTC,RC5	;031 cycles, 1.90 bit times
-	goto	ToOne1		;032 cycles, 1.96 bit times
+	goto	RcTo1_1		;032 cycles, 1.96 bit times
 	btfsc	PORTC,RC5	;033 cycles, 2.02 bit times
-	goto	ToOne1		;034 cycles, 2.08 bit times
+	goto	RcTo1_1		;034 cycles, 2.08 bit times
 	btfsc	PORTC,RC5	;035 cycles, 2.14 bit times
-	goto	ToOne1		;036 cycles, 2.20 bit times
+	goto	RcTo1_1		;036 cycles, 2.20 bit times
 	btfsc	PORTC,RC5	;037 cycles, 2.26 bit times
-	goto	ToOne1		;038 cycles, 2.33 bit times
+	goto	RcTo1_1		;038 cycles, 2.33 bit times
 	btfsc	PORTC,RC5	;039 cycles, 2.39 bit times
-	goto	ToOne1		;040 cycles, 2.45 bit times
+	goto	RcTo1_1		;040 cycles, 2.45 bit times
 	btfsc	PORTC,RC5	;041 cycles, 2.51 bit times
-	goto	ToOne0		;042 cycles, 2.57 bit times
+	goto	RcTo1_0		;042 cycles, 2.57 bit times
 	btfsc	PORTC,RC5	;043 cycles, 2.63 bit times
-	goto	ToOne0		;044 cycles, 2.69 bit times
+	goto	RcTo1_0		;044 cycles, 2.69 bit times
 	btfsc	PORTC,RC5	;045 cycles, 2.75 bit times
-	goto	ToOne0		;046 cycles, 2.82 bit times
+	goto	RcTo1_0		;046 cycles, 2.82 bit times
 	btfsc	PORTC,RC5	;047 cycles, 2.88 bit times
-	goto	ToOne0		;048 cycles, 2.94 bit times
+	goto	RcTo1_0		;048 cycles, 2.94 bit times
 	btfsc	PORTC,RC5	;049 cycles, 3.00 bit times
-	goto	ToOne0		;050 cycles, 3.06 bit times
+	goto	RcTo1_0		;050 cycles, 3.06 bit times
 	btfsc	PORTC,RC5	;051 cycles, 3.12 bit times
-	goto	ToOne0		;052 cycles, 3.18 bit times
+	goto	RcTo1_0		;052 cycles, 3.18 bit times
 	btfsc	PORTC,RC5	;053 cycles, 3.24 bit times
-	goto	ToOne0		;054 cycles, 3.30 bit times
+	goto	RcTo1_0		;054 cycles, 3.30 bit times
 	btfsc	PORTC,RC5	;055 cycles, 3.37 bit times
-	goto	ToOne0		;056 cycles, 3.43 bit times
+	goto	RcTo1_0		;056 cycles, 3.43 bit times
 	btfsc	PORTC,RC5	;057 cycles, 3.49 bit times
-	goto	ToOne0		;058 cycles, 3.55 bit times
-	moviw	FSR0++		;059 cycles, 3.61 bit times
-	goto	StZero		;060 cycles, 3.67 bit times
+	goto	RcTo1_0		;058 cycles, 3.55 bit times
+	btfss	PORTA,RA1	;059 cycles, 3.61 bit times
+	bcf	INDF0,7		;060 cycles, 3.67 bit times
+	moviw	FSR0++		;061 cycles, 3.73 bit times
+	goto	RcSt0		;062 cycles, 3.79 bit times
 
-ToZero2	movlw	B'00000100'	;003 cycles, 0.18 bit times
+RcTo0_2	movlw	B'00000100'	;003 cycles, 0.18 bit times
 	iorwf	INDF0,F		;004 cycles, 0.24 bit times
-	DNOP			;005-006 cycles, 0.31-0.37 bit times
+	btfss	PORTA,RA1	;005 cycles, 0.31 bit times
+	bcf	INDF0,7		;006 cycles, 0.37 bit times
 	DNOP			;007-008 cycles, 0.43-0.49 bit times
 	btfsc	PORTC,RC5	;009 cycles, 0.55 bit times
-	goto	ToOne1		;010 cycles, 0.61 bit times
+	goto	RcTo1_1		;010 cycles, 0.61 bit times
 	btfsc	PORTC,RC5	;011 cycles, 0.67 bit times
-	goto	ToOne1		;012 cycles, 0.73 bit times
+	goto	RcTo1_1		;012 cycles, 0.73 bit times
 	btfsc	PORTC,RC5	;013 cycles, 0.80 bit times
-	goto	ToOne1		;014 cycles, 0.86 bit times
+	goto	RcTo1_1		;014 cycles, 0.86 bit times
 	btfsc	PORTC,RC5	;015 cycles, 0.92 bit times
-	goto	ToOne1		;016 cycles, 0.98 bit times
+	goto	RcTo1_1		;016 cycles, 0.98 bit times
 	btfsc	PORTC,RC5	;017 cycles, 1.04 bit times
-	goto	ToOne1		;018 cycles, 1.10 bit times
+	goto	RcTo1_1		;018 cycles, 1.10 bit times
 	btfsc	PORTC,RC5	;019 cycles, 1.16 bit times
-	goto	ToOne1		;020 cycles, 1.22 bit times
+	goto	RcTo1_1		;020 cycles, 1.22 bit times
 	btfsc	PORTC,RC5	;021 cycles, 1.29 bit times
-	goto	ToOne1		;022 cycles, 1.35 bit times
+	goto	RcTo1_1		;022 cycles, 1.35 bit times
 	btfsc	PORTC,RC5	;023 cycles, 1.41 bit times
-	goto	ToOne1		;024 cycles, 1.47 bit times
+	goto	RcTo1_1		;024 cycles, 1.47 bit times
 	btfsc	PORTC,RC5	;025 cycles, 1.53 bit times
-	goto	ToOne0		;026 cycles, 1.59 bit times
+	goto	RcTo1_0		;026 cycles, 1.59 bit times
 	btfsc	PORTC,RC5	;027 cycles, 1.65 bit times
-	goto	ToOne0		;028 cycles, 1.71 bit times
+	goto	RcTo1_0		;028 cycles, 1.71 bit times
 	btfsc	PORTC,RC5	;029 cycles, 1.77 bit times
-	goto	ToOne0		;030 cycles, 1.84 bit times
+	goto	RcTo1_0		;030 cycles, 1.84 bit times
 	btfsc	PORTC,RC5	;031 cycles, 1.90 bit times
-	goto	ToOne0		;032 cycles, 1.96 bit times
+	goto	RcTo1_0		;032 cycles, 1.96 bit times
 	btfsc	PORTC,RC5	;033 cycles, 2.02 bit times
-	goto	ToOne0		;034 cycles, 2.08 bit times
+	goto	RcTo1_0		;034 cycles, 2.08 bit times
 	btfsc	PORTC,RC5	;035 cycles, 2.14 bit times
-	goto	ToOne0		;036 cycles, 2.20 bit times
+	goto	RcTo1_0		;036 cycles, 2.20 bit times
 	btfsc	PORTC,RC5	;037 cycles, 2.26 bit times
-	goto	ToOne0		;038 cycles, 2.33 bit times
+	goto	RcTo1_0		;038 cycles, 2.33 bit times
 	btfsc	PORTC,RC5	;039 cycles, 2.39 bit times
-	goto	ToOne0		;040 cycles, 2.45 bit times
-	moviw	FSR0++		;041 cycles, 2.51 bit times
-	goto	StZero		;042 cycles, 2.57 bit times
+	goto	RcTo1_0		;040 cycles, 2.45 bit times
+	btfss	PORTA,RA1	;041 cycles, 2.51 bit times
+	bcf	INDF0,7		;042 cycles, 2.57 bit times
+	moviw	FSR0++		;043 cycles, 2.63 bit times
+	goto	RcSt0		;044 cycles, 2.69 bit times
 
-ToZero1	movlw	B'00000010'	;003 cycles, 0.18 bit times
+RcTo0_1	movlw	B'00000010'	;003 cycles, 0.18 bit times
 	iorwf	INDF0,F		;004 cycles, 0.24 bit times
-	DNOP			;005-006 cycles, 0.31-0.37 bit times
+	btfss	PORTA,RA1	;005 cycles, 0.31 bit times
+	bcf	INDF0,7		;006 cycles, 0.37 bit times
 	DNOP			;007-008 cycles, 0.43-0.49 bit times
 	btfsc	PORTC,RC5	;009 cycles, 0.55 bit times
-	goto	ToOne0		;010 cycles, 0.61 bit times
+	goto	RcTo1_0		;010 cycles, 0.61 bit times
 	btfsc	PORTC,RC5	;011 cycles, 0.67 bit times
-	goto	ToOne0		;012 cycles, 0.73 bit times
+	goto	RcTo1_0		;012 cycles, 0.73 bit times
 	btfsc	PORTC,RC5	;013 cycles, 0.80 bit times
-	goto	ToOne0		;014 cycles, 0.86 bit times
+	goto	RcTo1_0		;014 cycles, 0.86 bit times
 	btfsc	PORTC,RC5	;015 cycles, 0.92 bit times
-	goto	ToOne0		;016 cycles, 0.98 bit times
+	goto	RcTo1_0		;016 cycles, 0.98 bit times
 	btfsc	PORTC,RC5	;017 cycles, 1.04 bit times
-	goto	ToOne0		;018 cycles, 1.10 bit times
+	goto	RcTo1_0		;018 cycles, 1.10 bit times
 	btfsc	PORTC,RC5	;019 cycles, 1.16 bit times
-	goto	ToOne0		;020 cycles, 1.22 bit times
+	goto	RcTo1_0		;020 cycles, 1.22 bit times
 	btfsc	PORTC,RC5	;021 cycles, 1.29 bit times
-	goto	ToOne0		;022 cycles, 1.35 bit times
+	goto	RcTo1_0		;022 cycles, 1.35 bit times
 	btfsc	PORTC,RC5	;023 cycles, 1.41 bit times
-	goto	ToOne0		;024 cycles, 1.47 bit times
-	moviw	FSR0++		;025 cycles, 1.53 bit times
-	goto	StZero		;026 cycles, 1.59 bit times
+	goto	RcTo1_0		;024 cycles, 1.47 bit times
+	btfss	PORTA,RA1	;025 cycles, 1.53 bit times
+	bcf	INDF0,7		;026 cycles, 1.59 bit times
+	moviw	FSR0++		;027 cycles, 1.65 bit times
+	goto	RcSt0		;028 cycles, 1.71 bit times
 
-ToZero0	movlw	B'00000001'	;003 cycles, 0.18 bit times
+RcTo0_0	movlw	B'00000001'	;003 cycles, 0.18 bit times
 	iorwf	INDF0,F		;004 cycles, 0.24 bit times
-	moviw	FSR0++		;005 cycles, 0.31 bit times
-	goto	StZero		;006 cycles, 0.37 bit times
+	btfss	PORTA,RA1	;005 cycles, 0.31 bit times
+	bcf	INDF0,7		;006 cycles, 0.37 bit times
+	moviw	FSR0++		;007 cycles, 0.43 bit times
+	goto	RcSt0		;008 cycles, 0.49 bit times
+
+
+;;; Received Data Decoder ;;;
+
+RecvDecode
+	movf	RC_CMDG,W	;Trust the group count that mac sent is
+	andlw	B'01111111'	; accurate and copy it into the group count
+	movwf	GROUPS		; variable that we return as well as a temp var
+	movwf	TEMP2		; that we can trash
+	movlw	0x20		;Start both pointers after the three initial
+	movwf	FSR0H		; IWM bytes (the sync byte, the length of the
+	movwf	FSR1H		; message in groups plus 0x80, the length of
+	movlw	0x03		; the expected reply in groups plus 0x80)
+	movwf	FSR0L		; "
+	movwf	FSR1L		; "
+
+RDLoop	btfss	INDF0,7		;If the MSB of the next byte is clear, we went
+	bra	RDSus_7		; into suspend here, switch loops
+	moviw	FSR0++		;Pick up the byte with the LSBs of the next 
+	movwf	TEMP		; seven
+	btfss	INDF0,7		;If the MSB of the next byte is clear, we went
+	bra	RDSus_6		; into suspend here, switch loops
+	lsrf	TEMP,F		;Rotate the LSB of the first byte of the group
+	rlf	INDF0,W		; into place
+	movwi	FSR1++		;Write the restored byte to memory
+	moviw	FSR0++		;Advance the input pointer
+	btfss	INDF0,7		;If the MSB of the next byte is clear, we went
+	bra	RDSus_5		; into suspend here, switch loops
+	lsrf	TEMP,F		;Rotate the LSB of the second byte of the group
+	rlf	INDF0,W		; into place
+	movwi	FSR1++		;Write the restored byte to memory
+	moviw	FSR0++		;Advance the input pointer
+	btfss	INDF0,7		;If the MSB of the next byte is clear, we went
+	bra	RDSus_4		; into suspend here, switch loops
+	lsrf	TEMP,F		;Rotate the LSB of the third byte of the group
+	rlf	INDF0,W		; into place
+	movwi	FSR1++		;Write the restored byte to memory
+	moviw	FSR0++		;Advance the input pointer
+	btfss	INDF0,7		;If the MSB of the next byte is clear, we went
+	bra	RDSus_3		; into suspend here, switch loops
+	lsrf	TEMP,F		;Rotate the LSB of the fourth byte of the group
+	rlf	INDF0,W		; into place
+	movwi	FSR1++		;Write the restored byte to memory
+	moviw	FSR0++		;Advance the input pointer
+	btfss	INDF0,7		;If the MSB of the next byte is clear, we went
+	bra	RDSus_2		; into suspend here, switch loops
+	lsrf	TEMP,F		;Rotate the LSB of the fifth byte of the group
+	rlf	INDF0,W		; into place
+	movwi	FSR1++		;Write the restored byte to memory
+	moviw	FSR0++		;Advance the input pointer
+	btfss	INDF0,7		;If the MSB of the next byte is clear, we went
+	bra	RDSus_1		; into suspend here, switch loops
+	lsrf	TEMP,F		;Rotate the LSB of the sixth byte of the group
+	rlf	INDF0,W		; into place
+	movwi	FSR1++		;Write the restored byte to memory
+	moviw	FSR0++		;Advance the input pointer
+	btfss	INDF0,7		;If the MSB of the next byte is clear, we went
+	bra	RDSus_0		; into suspend here, switch loops
+	lsrf	TEMP,F		;Rotate the LSB of the last byte of the group
+	rlf	INDF0,W		; into place
+	movwi	FSR1++		;Write the restored byte to memory
+	moviw	FSR0++		;Advance the input pointer
+	decfsz	TEMP2,F		;Decrement the group count and loop if it's not
+	bra	RDLoop		; yet zero
+	return
+
+RDSus_7	moviw	FSR0++		;Pick up the byte with the LSBs of the next 
+	movwf	TEMP		; seven
+RDSus_6	lsrf	TEMP,F		;Rotate the LSB of the first byte of the group
+	rlf	INDF0,W		; into place
+	movwi	FSR1++		;Write the restored byte to memory
+	moviw	FSR0++		;Advance the input pointer
+RDSus_5	lsrf	TEMP,F		;Rotate the LSB of the second byte of the group
+	rlf	INDF0,W		; into place
+	movwi	FSR1++		;Write the restored byte to memory
+	moviw	FSR0++		;Advance the input pointer
+RDSus_4	lsrf	TEMP,F		;Rotate the LSB of the third byte of the group
+	rlf	INDF0,W		; into place
+	movwi	FSR1++		;Write the restored byte to memory
+	moviw	FSR0++		;Advance the input pointer
+RDSus_3	lsrf	TEMP,F		;Rotate the LSB of the fourth byte of the group
+	rlf	INDF0,W		; into place
+	movwi	FSR1++		;Write the restored byte to memory
+	moviw	FSR0++		;Advance the input pointer
+RDSus_2	lsrf	TEMP,F		;Rotate the LSB of the fifth byte of the group
+	rlf	INDF0,W		; into place
+	movwi	FSR1++		;Write the restored byte to memory
+	moviw	FSR0++		;Advance the input pointer
+RDSus_1	lsrf	TEMP,F		;Rotate the LSB of the sixth byte of the group
+	rlf	INDF0,W		; into place
+	movwi	FSR1++		;Write the restored byte to memory
+	moviw	FSR0++		;Advance the input pointer
+RDSus_0	lsrf	TEMP,F		;Rotate the LSB of the last byte of the group
+	rlf	INDF0,W		; into place
+	movwi	FSR1++		;Write the restored byte to memory
+	moviw	FSR0++		;Advance the input pointer
+	decf	TEMP2,F		;Decrement the group count
+	btfsc	STATUS,Z	;If the group count happens to be zero, mac
+	return			; suspended in the last group and we're done
+RDSusLp	moviw	FSR0++		;Read the next byte, and if it's a sync byte,
+	xorlw	0xAA		; continue processing data
+	btfsc	STATUS,Z	; "
+	bra	RDLoop		; "
+	btfss	FSR0H,2		;As a safety measure, check if we've gone off
+	bra	RDSusLp		; the edge of linear memory before we loop
+	bsf	FLAGS,ABORTED	; to check the next byte; if we have, set the
+	return			; aborted flag and return
 
 
 ;;; End of Program ;;;
