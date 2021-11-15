@@ -23,11 +23,12 @@ The contents of the first 512-byte sector of the MMC card are reported as the Co
    * Mac will resume transmission with an 0xAA byte, followed by the bytes in the next group after the group where the holdoff began.
    * DCD must resume transmission with an 0xAA byte, followed by the bytes in the next group after the group where the holdoff began.
 * The Controller Status (command 0x03) block is slightly different than specified.
-   * The total size of the Controller Status block is 343 bytes (49 groups), not 532 bytes.
+   * The total size of the Controller Status block is 336 bytes, not 532 bytes.
       * 336 bytes of data, 6 byte header, checksum byte == 343 bytes == 49 7-to-8 groups
    * The Icon field contains a 32x32 icon as a 1-bit bitmap, followed by its 32x32 mask, also as a 1-bit bitmap, for a total of 256 bytes.
       * The format of the bitmaps is identical to that of ICON resources.
    * The Filler field is replaced by a 16-byte Pascal string (first byte is length) that determines what appears in the "Where:" field of the Get Info dialog box.
+* The checksum byte is chosen such that all data bytes in all 7-to-8 groups (not including the sync byte or the command/response length IWM bytes) sum to 0 modulo 256.
 
 ## Details Out of Scope for DCD Documentation But Useful to Know
 
