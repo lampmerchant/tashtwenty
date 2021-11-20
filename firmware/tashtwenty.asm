@@ -26,17 +26,17 @@
 
 ;;; Connections ;;;
 
-;;;                                                          ;;;
-;                         .--------.                           ;
-;                 Supply -|01 \/ 14|- Ground                   ;
-;      !ENBL --->    RA5 -|02    13|- RA0    ---> Always 0     ;
-;        PH3 --->    RA4 -|03    12|- RA1    <--- PH0          ;
-;        PH2 --->    RA3 -|04    11|- RA2    <--- PH1          ;
-;         WR --->    RC5 -|05    10|- RC0    ---> MMC SCK      ;
-;         RD <---    RC4 -|06    09|- RC1    <--- MMC MISO     ;
-;    MMC !CS <---    RC3 -|07    08|- RC2    ---> MMC MOSI     ;
-;                         '--------'                           ;
-;;;                                                          ;;;
+;;;                                                           ;;;
+;                         .--------.                            ;
+;                 Supply -|01 \/ 14|- Ground                    ;
+;      !ENBL --->    RA5 -|02    13|- RA0    ---> Next !ENBL    ;
+;        PH3 --->    RA4 -|03    12|- RA1    <--- PH0           ;
+;        PH2 --->    RA3 -|04    11|- RA2    <--- PH1           ;
+;         WR --->    RC5 -|05    10|- RC0    ---> MMC SCK       ;
+;         RD <---    RC4 -|06    09|- RC1    <--- MMC MISO      ;
+;    MMC !CS <---    RC3 -|07    08|- RC2    ---> MMC MOSI      ;
+;                         '--------'                            ;
+;;;                                                           ;;;
 
 
 ;;; Assembler Directives ;;;
@@ -77,6 +77,11 @@ DNOP	macro
 ;;; Constants ;;;
 
 ABORTED	equ	7	;Set if a transmit or receive operation was aborted
+DEV3ON	equ	4	;Set if we're emulating a fourth device
+DEV2ON	equ	3	;Set if we're emulating a third device
+DEV1ON	equ	2	;Set if we're emulating a second device
+DEVSEL1	equ	1	;MSB of which device is selected
+DEVSEL0	equ	0	;LSB of which device is selected
 
 M_FAIL	equ	7	;Set when there's been a failure on the MMC interface
 M_CMDLR	equ	6	;Set when R3 or R7 is expected (5 bytes), not R1
@@ -94,11 +99,11 @@ M_MBWR	equ	3	;Set when a multiblock write is in progress
 	CRC16H	;High byte of the CRC16 register
 	CRC16L	;Low byte of the CRC16 register
 	M_FLAGS	;MMC flags
-	M_BUF1	;The command to be sent, later the R1 response byte	
-	M_BUF2	;First (high) byte of the address, first byte of R3/R7 response
-	M_BUF3	;Second byte of the address, second byte of R3/R7 response
-	M_BUF4	;Third byte of the address, third byte of R3/R7 response
-	M_BUF5	;Fourth (low) byte of the address, last byte of R3/R7 response
+	M_CMDN	;The MMC command to be sent, later the R1 response byte	
+	M_ADR3	;First (high) byte of the address, first byte of R3/R7 response
+	M_ADR2	;Second byte of the address, second byte of R3/R7 response
+	M_ADR1	;Third byte of the address, third byte of R3/R7 response
+	M_ADR0	;Fourth (low) byte of the address, last byte of R3/R7 response
 	M_CRC	;CRC byte of the command to be sent
 	TEMP	;Various purposes
 	TEMP2	;Various purposes
@@ -149,6 +154,8 @@ M_MBWR	equ	3	;Set when a multiblock write is in progress
 Interrupt
 	lslf	PORTA,W		;32 entries in the jump table, each has four
 	brw			; instructions; jump to the one matching state
+	nop			;We expect RA0 to be high
+	nop			; "
 	
 IntEn0	movlb	7		;This is the suspend state, so we should never
 	clrf	IOCAF		; get here unless it's a blip on one of the
@@ -283,7 +290,7 @@ IntDoneReceive
 	movlp	high RecvDecode	;Decode the data we've received
 	call	RecvDecode	; "
 	bsf	PORTC,RC4	;Deassert !HSHK to acknowledge receive is done
-IntDRc0	movf	PORTA,W		;Check the current state
+IntDRc0	decf	PORTA,W		;Check the current state
 	xorlw	B'00000110'	;If it's still 3, mac hasn't acknowledged our
 	btfsc	STATUS,Z	; acknowledgment of the end of received data
 	bra	IntDRc0		; yet, so loop again
@@ -333,10 +340,9 @@ Init
 	clrf	ANSELA
 	clrf	ANSELC
 
-	banksel	LATA		;RA0 always off, RD and !CS high to start
-	movlw	B'00111110'
-	movwf	LATA
+	banksel	LATA		;Next !ENBL off, RD and !CS high to start
 	movlw	B'00111111'
+	movwf	LATA
 	movwf	LATC
 
 	banksel	TRISA		;State pins inputs, RA0 output, WR input, RD
@@ -366,97 +372,22 @@ DelayMs	DELAY	242		; has been done
 	movlw	B'00100001'	; of the SPI interface up to 2 MHz
 	movwf	SSPCON1		; "
 	movlb	0		; "
-	;fall through
+
+	bsf	FLAGS,DEV1ON
+	bsf	FLAGS,DEV2ON
+	bsf	FLAGS,DEV3ON
+
+	goto	Dev0Jump
 
 
 ;;; Mainline Code ;;;
 
-WaitNoEnbl
-	btfss	PORTA,RA5	;Spin until !ENBL goes high
-	bra	$-1		; "
-
-WaitEnbl
-	movlw	B'00110010'	;Tristate RD
-	tris	7		; "
-	bsf	PORTC,RC4	;Latch a 1 on RD for when we drive it
-	btfsc	PORTA,RA5	;Spin until !ENBL goes low
-	bra	$-1		; "
-	movlw	B'00100010'	;Drive the RD pin, high at first
-	tris	7		; "
-
-IdleJump
-	movf	PORTA,W		;32 entries in the jump table, each has two
-	brw			; instructions; jump to the one matching state
-IdleEn0	bsf	PORTC,RC4	;HOFF is asserted but there's nothing to hold
-	bra	IdleJump	; off from, so drive RD high to deassert !HSHK
-IdleEn1	bsf	PORTC,RC4	;Mac wants to exchange data for some reason, so
-	bra	IdleJump	; drive RD high because what else can we do
-IdleEn2	bsf	PORTC,RC4	;Mac wants us to idle, cool, we're already
-	bra	IdleJump	; idling, so drive RD high to deassert !HSHK
-IdleEn3	bsf	PORTC,RC4	;Mac wants to send a command, drive RD high to
-	bra	GetCommand	; deassert !HSHK and prepare to receive
-IdleEn4	bsf	PORTC,RC4	;Mac wants us to reset, this is sorta reset, so
-	bra	IdleJump	; drive RD high to deassert !HSHK 
-IdleEn5	bcf	PORTC,RC4	;Mac wants us to drive RD low, so drive RD low
-	bra	IdleJump	; "
-IdleEn6	bsf	PORTC,RC4	;Mac wants us to drive RD high, so drive RD
-	bra	IdleJump	; high
-IdleEn7	bsf	PORTC,RC4	;Mac wants us to drive RD high, so drive RD
-	bra	IdleJump	; high
-IdleENx	bsf	PORTC,RC4	;Mac wants to talk to next device, none exists,
-	bra	WaitNoEnbl	; so drive RD high and await !ENBL deasserted
-	bsf	PORTC,RC4	;Mac wants to talk to next device, none exists,
-	bra	WaitNoEnbl	; so drive RD high and await !ENBL deasserted
-	bsf	PORTC,RC4	;Mac wants to talk to next device, none exists,
-	bra	WaitNoEnbl	; so drive RD high and await !ENBL deasserted
-	bsf	PORTC,RC4	;Mac wants to talk to next device, none exists,
-	bra	WaitNoEnbl	; so drive RD high and await !ENBL deasserted
-	bsf	PORTC,RC4	;Mac wants to talk to next device, none exists,
-	bra	WaitNoEnbl	; so drive RD high and await !ENBL deasserted
-	bsf	PORTC,RC4	;Mac wants to talk to next device, none exists,
-	bra	WaitNoEnbl	; so drive RD high and await !ENBL deasserted
-	bsf	PORTC,RC4	;Mac wants to talk to next device, none exists,
-	bra	WaitNoEnbl	; so drive RD high and await !ENBL deasserted
-	bsf	PORTC,RC4	;Mac wants to talk to next device, none exists,
-	bra	WaitNoEnbl	; so drive RD high and await !ENBL deasserted
-IdleNEn	bra	WaitEnbl	;!ENBL has been deasserted, so get off the bus
-	nop			; and wait for it to be asserted again
-	bra	WaitEnbl	;!ENBL has been deasserted, so get off the bus
-	nop			; and wait for it to be asserted again
-	bra	WaitEnbl	;!ENBL has been deasserted, so get off the bus
-	nop			; and wait for it to be asserted again
-	bra	WaitEnbl	;!ENBL has been deasserted, so get off the bus
-	nop			; and wait for it to be asserted again
-	bra	WaitEnbl	;!ENBL has been deasserted, so get off the bus
-	nop			; and wait for it to be asserted again
-	bra	WaitEnbl	;!ENBL has been deasserted, so get off the bus
-	nop			; and wait for it to be asserted again
-	bra	WaitEnbl	;!ENBL has been deasserted, so get off the bus
-	nop			; and wait for it to be asserted again
-	bra	WaitEnbl	;!ENBL has been deasserted, so get off the bus
-	nop			; and wait for it to be asserted again
-	bra	WaitEnbl	;!ENBL has been deasserted, so get off the bus
-	nop			; and wait for it to be asserted again
-	bra	WaitEnbl	;!ENBL has been deasserted, so get off the bus
-	nop			; and wait for it to be asserted again
-	bra	WaitEnbl	;!ENBL has been deasserted, so get off the bus
-	nop			; and wait for it to be asserted again
-	bra	WaitEnbl	;!ENBL has been deasserted, so get off the bus
-	nop			; and wait for it to be asserted again
-	bra	WaitEnbl	;!ENBL has been deasserted, so get off the bus
-	nop			; and wait for it to be asserted again
-	bra	WaitEnbl	;!ENBL has been deasserted, so get off the bus
-	nop			; and wait for it to be asserted again
-	bra	WaitEnbl	;!ENBL has been deasserted, so get off the bus
-	nop			; and wait for it to be asserted again
-	bra	WaitEnbl	;!ENBL has been deasserted, so get off the bus
-	nop			; and wait for it to be asserted again
-
 GetCommand
+	bsf	PORTC,RC4	;Deassert !HSHK and prepare to receive
 	movlp	high Receive	;Initiate receive
 	call	Receive		; "
 	btfsc	FLAGS,ABORTED	;If it was aborted, return to idle loop
-	goto	IdleJump	; "
+	return			; "
 	call	CheckChecksum	;Calculate the checksum of the received block
 	btfss	STATUS,Z	;If the checksum was bad, send a NAK
 	bra	NakCommand	; "
@@ -485,7 +416,7 @@ CmdUnknown
 	call	CalcChecksum	;Calculate the checksum of this placeholder
 	movlp	high Transmit	;Initiate transmission; if it's aborted, we
 	call	Transmit	; don't actually do anything differently
-	goto	IdleJump	;Done, hope the host doesn't mind
+	return			;Done, hope the host doesn't mind
 
 NakCommand
 	movlw	1		;A NAK is a blank one-group command buffer with
@@ -504,17 +435,22 @@ NakCommand
 	clrf	FSR0L		; "
 	movlp	high Transmit	;Initiate transmission; if it's aborted, we
 	call	Transmit	; don't actually do anything differently
-	goto	IdleJump	;Done
+	return			;Done
 
 CmdRead
 	call	MmcStopOngoing	;Stop any multiblock read or write
-	clrf	M_BUF5		;Shift the block address left by 9 (multiply it
+	clrf	M_ADR0		;Shift the block address left by 9 (multiply it
 	lslf	RC_ADRL,W	; by 512) to transform it into the byte address
-	movwf	M_BUF4		; used by the MMC card
+	movwf	M_ADR1		; used by the MMC card
 	rlf	RC_ADRM,W	; "
-	movwf	M_BUF3		; "
+	movwf	M_ADR2		; "
 	rlf	RC_ADRH,W	; "
-	movwf	M_BUF2		; "
+	andlw	B'00000111'
+	movwf	M_ADR3		; "
+	btfsc	FLAGS,DEVSEL1
+	bsf	M_ADR3,4
+	btfsc	FLAGS,DEVSEL0
+	bsf	M_ADR3,3
 	movf	RC_BLKS,W	;Move the block count from receiver position to
 	movwf	TX_BLKS		; transmitter position
 	movlw	0x80		;Command number is the read command with the
@@ -525,12 +461,12 @@ CmdRead
 	clrf	TX_PAD3		; "
 	;TODO clear 20 tag bytes too?
 CmdRea0	movlw	0x02		;Increment the read address by 512 - we do this
-	addwf	M_BUF4,F	; on the first loop iteration because the first
+	addwf	M_ADR1,F	; on the first loop iteration because the first
 	movlw	0		; sector on the MMC card is the controller
-	addwfc	M_BUF3,F	; status block, conveniently
-	addwfc	M_BUF2,F	; "
+	addwfc	M_ADR2,F	; status block, conveniently
+	addwfc	M_ADR3,F	; "
 	movlw	0x51		;Set up a read command for the MMC card (R1-
-	movwf	M_BUF1		; type response)
+	movwf	M_CMDN		; type response)
 	bcf	M_FLAGS,M_CMDLR	; "
 	bcf	M_FLAGS,M_CMDRB	; "
 	bcf	PORTC,RC3	;Assert !CS
@@ -558,27 +494,32 @@ CmdRea0	movlw	0x02		;Increment the read address by 512 - we do this
 	movlp	high Transmit	;Initiate transmission
 	call	Transmit	; "
 	btfsc	FLAGS,ABORTED	;If the command was aborted, return to idle
-	goto	IdleJump	; loop
+	return			; loop
 	decfsz	TX_BLKS,F	;Decrement the block count; if it hits zero,
 	bra	CmdRea0		; that's all the reading we were requested to
-	goto	IdleJump	; do, so call it done
+	return			; do, so call it done
 
 CmdWrite
 	call	MmcStopOngoing	;Stop any multiblock read or write
-	clrf	M_BUF5		;Shift the block address left by 9 (multiply it
+	clrf	M_ADR0		;Shift the block address left by 9 (multiply it
 	lslf	RC_ADRL,W	; by 512) to transform it into the byte address
-	movwf	M_BUF4		; used by the MMC card
+	movwf	M_ADR1		; used by the MMC card
 	rlf	RC_ADRM,W	; "
-	movwf	M_BUF3		; "
+	movwf	M_ADR2		; "
 	rlf	RC_ADRH,W	; "
-	movwf	M_BUF2		; "
+	andlw	B'00000111'
+	movwf	M_ADR3		; "
+	btfsc	FLAGS,DEVSEL1
+	bsf	M_ADR3,4
+	btfsc	FLAGS,DEVSEL0
+	bsf	M_ADR3,3
 	movlw	0x02		;Increment the read address by 512 - we do this
-	addwf	M_BUF4,F	; at the start of a write because the first
+	addwf	M_ADR1,F	; at the start of a write because the first
 	movlw	0		; sector on the MMC card is the controller
-	addwfc	M_BUF3,F	; status block
-	addwfc	M_BUF2,F	; "
+	addwfc	M_ADR2,F	; status block
+	addwfc	M_ADR3,F	; "
 	movlw	0x59		;Set up a write command for the MMC card (R1-
-	movwf	M_BUF1		; type reply)
+	movwf	M_CMDN		; type reply)
 	bcf	M_FLAGS,M_CMDLR	; "
 	bcf	M_FLAGS,M_CMDRB	; "
 	bsf	M_FLAGS,M_MBWR	;Set the flag for an ongoing multiblock write
@@ -615,16 +556,20 @@ CmdWriteCont
 	call	CalcChecksum	;Calculate the checksum on our response
 	movlp	high Transmit	;Initiate transmission; if it's aborted, we
 	call	Transmit	; don't actually do anything differently
-	goto	IdleJump	;Done
+	return			;Done
 
 CmdStatus
 	call	MmcStopOngoing	;Stop any multiblock read or write
-	clrf	M_BUF5		;Set the address to read the first sector of
-	clrf	M_BUF4		; the MMC card
-	clrf	M_BUF3		; "
-	clrf	M_BUF2		; "
+	clrf	M_ADR0		;Set the address to read the first sector of
+	clrf	M_ADR1		; the MMC card
+	clrf	M_ADR2		; "
+	clrf	M_ADR3		; "
+	btfsc	FLAGS,DEVSEL1
+	bsf	M_ADR3,4
+	btfsc	FLAGS,DEVSEL0
+	bsf	M_ADR3,3
 	movlw	0x51		;Set up a read command for the MMC card (R1-
-	movwf	M_BUF1		; type reply)
+	movwf	M_CMDN		; type reply)
 	bcf	M_FLAGS,M_CMDLR	; "
 	bcf	M_FLAGS,M_CMDRB	; "
 	movlw	0x83		;Command number is the status command with the
@@ -658,7 +603,7 @@ CmdStatus
 	call	CalcChecksum	;Calculate the checksum on our response
 	movlp	high Transmit	;Initiate transmission; if it's aborted, we
 	call	Transmit	; don't actually do anything differently
-	goto	IdleJump	;Done
+	return			;Done
 
 
 ;;; Subprograms ;;;
@@ -769,69 +714,69 @@ MmcIni0	movlw	0xFF		; "
 	movlb	0		;Assert !CS
 	bcf	PORTC,RC3	; "
 	movlw	0x40		;Send command 0 (expect R1-type response)
-	movwf	M_BUF1		; which, with !CS asserted, signals to the card
-	clrf	M_BUF2		; that we want to enter SPI mode
-	clrf	M_BUF3		; "
-	clrf	M_BUF4		; "
-	clrf	M_BUF5		; "
+	movwf	M_CMDN		; which, with !CS asserted, signals to the card
+	clrf	M_ADR3		; that we want to enter SPI mode
+	clrf	M_ADR2		; "
+	clrf	M_ADR1		; "
+	clrf	M_ADR0		; "
 	bcf	M_FLAGS,M_CMDLR	; "
 	bcf	M_FLAGS,M_CMDRB	; "
 	call	MmcCmd		; "
 	btfsc	M_FLAGS,M_FAIL	;If this command failed, unrecognized or
 	return			; missing MMC card, fail the init operation
-	movf	M_BUF1,W	;If this command returned any response other
+	movf	M_CMDN,W	;If this command returned any response other
 	xorlw	0x01		; than 0x01 ('in idle state'), unrecognized MMC
 	btfss	STATUS,Z	; card, fail the init operation
 	bsf	M_FLAGS,M_FAIL	; "
 	btfss	STATUS,Z	; "
 	return			; "
 MmcIni1	movlw	0x41		;Send command 1 (expect R1-type response),
-	movwf	M_BUF1		; which tells the card to initialize
-	clrf	M_BUF2		; "
-	clrf	M_BUF3		; "
-	clrf	M_BUF4		; "
-	clrf	M_BUF5		; "
+	movwf	M_CMDN		; which tells the card to initialize
+	clrf	M_ADR3		; "
+	clrf	M_ADR2		; "
+	clrf	M_ADR1		; "
+	clrf	M_ADR0		; "
 	bcf	M_FLAGS,M_CMDLR	; "
 	bcf	M_FLAGS,M_CMDRB	; "
 	call	MmcCmd		; "
 	btfsc	M_FLAGS,M_FAIL	;If this command failed, unrecognized MMC card,
 	return			; fail the init operation
-	movf	M_BUF1,W	;If it returned an 0x00 status, initialization
+	movf	M_CMDN,W	;If it returned an 0x00 status, initialization
 	btfsc	STATUS,Z	; is finished
 	bra	MmcIni2		; "
-	decf	M_BUF1,W	;If it returned an 0x01 status, initialization
+	decf	M_CMDN,W	;If it returned an 0x01 status, initialization
 	btfsc	STATUS,Z	; is still proceeding, so try again
 	bra	MmcIni1		; "
 	bsf	M_FLAGS,M_FAIL	;If it returned anything else, something is
 	return			; awry, fail the init operation
 MmcIni2	movlw	0x50		;Send command 16 (expect R1-type response) to
-	movwf	M_BUF1		; tell the card we want to deal in 512-byte
-	clrf	M_BUF2		; sectors
-	clrf	M_BUF3		; "
+	movwf	M_CMDN		; tell the card we want to deal in 512-byte
+	clrf	M_ADR3		; sectors
+	clrf	M_ADR2		; "
 	movlw	0x02		; "
-	movwf	M_BUF4		; "
-	clrf	M_BUF5		; "
+	movwf	M_ADR1		; "
+	clrf	M_ADR0		; "
 	bcf	M_FLAGS,M_CMDLR	; "
 	bcf	M_FLAGS,M_CMDRB	; "
 	call	MmcCmd		; "
 	btfsc	M_FLAGS,M_FAIL	;If this command failed, something is wrong,
 	return			; fail the init operation
-	movf	M_BUF1,W	;If this command returned any response other
+	movf	M_CMDN,W	;If this command returned any response other
 	btfss	STATUS,Z	; than 0x00, something is wrong, fail the init
 	bsf	M_FLAGS,M_FAIL	; operation
 	movlw	0x7B		;Send command 59 (expect R1-type response) to
-	movwf	M_BUF1		; tell the card we want to make life hard on
-	clrf	M_BUF2		; ourselves and have our CRCs checked by the
-	clrf	M_BUF3		; card
-	clrf	M_BUF4		; "
+	movwf	M_CMDN		; tell the card we want to make life hard on
+	clrf	M_ADR3		; ourselves and have our CRCs checked by the
+	clrf	M_ADR2		; card
+	clrf	M_ADR1		; "
 	movlw	0x01		; "
-	movwf	M_BUF5		; "
+	movwf	M_ADR0		; "
 	bcf	M_FLAGS,M_CMDLR	; "
 	bcf	M_FLAGS,M_CMDRB	; "
 	call	MmcCmd		; "
 	btfsc	M_FLAGS,M_FAIL	;If this command failed, something is wrong,
 	return			; fail the init operation
-	movf	M_BUF1,W	;If this command returned any response other
+	movf	M_CMDN,W	;If this command returned any response other
 	btfss	STATUS,Z	; than 0x00, something is wrong, fail the init
 	bsf	M_FLAGS,M_FAIL	; operation
 	bsf	PORTC,RC3	;Deassert !CS
@@ -964,11 +909,11 @@ MmcStopOngoing
 	btfss	M_FLAGS,M_MBRD	;If there's not an ongoing read operation, this
 	return			; function was called needlessly, return
 	movlw	0x4C		;Send a CMD12 to stop the ongoing read, R1b
-	movwf	M_BUF1		; reply type
-	clrf	M_BUF2		; "
-	clrf	M_BUF3		; "
-	clrf	M_BUF4		; "
-	clrf	M_BUF5		; "
+	movwf	M_CMDN		; reply type
+	clrf	M_ADR3		; "
+	clrf	M_ADR2		; "
+	clrf	M_ADR1		; "
+	clrf	M_ADR0		; "
 	bcf	M_FLAGS,M_CMDLR	; "
 	bsf	M_FLAGS,M_CMDRB	; "
 	call	MmcCmd		; "
@@ -997,35 +942,35 @@ MmcCmd
 	clrf	M_CRC		;Start the CRC7 register out at 0
 	movlp	high LutCrc7	;Point PCLATH to the CRC7 lookup table
 	movlb	4		;Switch to the bank with the SSP registers
-	movf	M_BUF1,W	;Clock out all six MMC buffer bytes as command,
+	movf	M_CMDN,W	;Clock out all six MMC buffer bytes as command,
 	movwf	SSP1BUF		; calculating the CRC7 along the way
 	xorwf	M_CRC,W		; "
 	callw			; "
 	movwf	M_CRC		; "
 	btfss	SSP1STAT,BF	; "
 	bra	$-1		; "
-	movf	M_BUF2,W	; "
+	movf	M_ADR3,W	; "
 	movwf	SSP1BUF		; "
 	xorwf	M_CRC,W		; "
 	callw			; "
 	movwf	M_CRC		; "
 	btfss	SSP1STAT,BF	; "
 	bra	$-1		; "
-	movf	M_BUF3,W	; "
+	movf	M_ADR2,W	; "
 	movwf	SSP1BUF		; "
 	xorwf	M_CRC,W		; "
 	callw			; "
 	movwf	M_CRC		; "
 	btfss	SSP1STAT,BF	; "
 	bra	$-1		; "
-	movf	M_BUF4,W	; "
+	movf	M_ADR1,W	; "
 	movwf	SSP1BUF		; "
 	xorwf	M_CRC,W		; "
 	callw			; "
 	movwf	M_CRC		; "
 	btfss	SSP1STAT,BF	; "
 	bra	$-1		; "
-	movf	M_BUF5,W	; "
+	movf	M_ADR0,W	; "
 	movwf	SSP1BUF		; "
 	xorwf	M_CRC,W		; "
 	callw			; "
@@ -1053,7 +998,7 @@ MmcCmd1	movlw	0xFF		;Clock a byte out of the MMC card while keeping
 	movlb	0		; and return
 	return			; "
 MmcCmd2	decf	WREG,W		;Store the byte we received as R1-type status
-	movwf	M_BUF1		; in the buffer
+	movwf	M_CMDN		; in the buffer
 	btfss	M_FLAGS,M_CMDLR	;If we aren't expecting a long (R3/R7-type)
 	bra	MmcCmd3		; reply, we're done
 	movlw	0xFF		;Clock first extended reply byte out of the
@@ -1061,25 +1006,25 @@ MmcCmd2	decf	WREG,W		;Store the byte we received as R1-type status
 	btfss	SSP1STAT,BF	; in the buffer
 	bra	$-1		; "
 	movf	SSP1BUF,W	; "
-	movwf	M_BUF2		; "
+	movwf	M_ADR3		; "
 	movlw	0xFF		;Clock second extended reply byte out of the
 	movwf	SSP1BUF		; MMC card while keeping MOSI high and store it
 	btfss	SSP1STAT,BF	; in the buffer
 	bra	$-1		; "
 	movf	SSP1BUF,W	; "
-	movwf	M_BUF3		; "
+	movwf	M_ADR2		; "
 	movlw	0xFF		;Clock third extended reply byte out of the
 	movwf	SSP1BUF		; MMC card while keeping MOSI high and store it
 	btfss	SSP1STAT,BF	; in the buffer
 	bra	$-1		; "
 	movf	SSP1BUF,W	; "
-	movwf	M_BUF4		; "
+	movwf	M_ADR1		; "
 	movlw	0xFF		;Clock fourth extended reply byte out of the
 	movwf	SSP1BUF		; MMC card while keeping MOSI high and store it
 	btfss	SSP1STAT,BF	; in the buffer
 	bra	$-1		; "
 	movf	SSP1BUF,W	; "
-	movwf	M_BUF5		; "
+	movwf	M_ADR0		; "
 MmcCmd3	btfsc	M_FLAGS,M_CMDRB	;If we're expecting an R1b reply, wait for the
 	call	MmcWaitBusy	; card not to be busy anymore before returning
 	movlb	0		;Restore BSR to 0
@@ -1105,787 +1050,522 @@ MmcWai0	movlw	0xFF		;Clock a byte out of the MMC card while keeping
 	return
 
 
-;;; CRC Lookup Tables ;;;
+;;; Idle Handler ;;;
 
-	org	0x800
+	org	0x7F0
 
-LutCrc7
-	retlw	0x00
-	retlw	0x12
-	retlw	0x24
-	retlw	0x36
-	retlw	0x48
-	retlw	0x5A
-	retlw	0x6C
-	retlw	0x7E
-	retlw	0x90
-	retlw	0x82
-	retlw	0xB4
-	retlw	0xA6
-	retlw	0xD8
-	retlw	0xCA
-	retlw	0xFC
-	retlw	0xEE
-	retlw	0x32
-	retlw	0x20
-	retlw	0x16
-	retlw	0x04
-	retlw	0x7A
-	retlw	0x68
-	retlw	0x5E
-	retlw	0x4C
-	retlw	0xA2
-	retlw	0xB0
-	retlw	0x86
-	retlw	0x94
-	retlw	0xEA
-	retlw	0xF8
-	retlw	0xCE
-	retlw	0xDC
-	retlw	0x64
-	retlw	0x76
-	retlw	0x40
-	retlw	0x52
-	retlw	0x2C
-	retlw	0x3E
-	retlw	0x08
-	retlw	0x1A
-	retlw	0xF4
-	retlw	0xE6
-	retlw	0xD0
-	retlw	0xC2
-	retlw	0xBC
-	retlw	0xAE
-	retlw	0x98
-	retlw	0x8A
-	retlw	0x56
-	retlw	0x44
-	retlw	0x72
-	retlw	0x60
-	retlw	0x1E
-	retlw	0x0C
-	retlw	0x3A
-	retlw	0x28
-	retlw	0xC6
-	retlw	0xD4
-	retlw	0xE2
-	retlw	0xF0
-	retlw	0x8E
-	retlw	0x9C
-	retlw	0xAA
-	retlw	0xB8
-	retlw	0xC8
-	retlw	0xDA
-	retlw	0xEC
-	retlw	0xFE
-	retlw	0x80
-	retlw	0x92
-	retlw	0xA4
-	retlw	0xB6
-	retlw	0x58
-	retlw	0x4A
-	retlw	0x7C
-	retlw	0x6E
-	retlw	0x10
-	retlw	0x02
-	retlw	0x34
-	retlw	0x26
-	retlw	0xFA
-	retlw	0xE8
-	retlw	0xDE
-	retlw	0xCC
-	retlw	0xB2
-	retlw	0xA0
-	retlw	0x96
-	retlw	0x84
-	retlw	0x6A
-	retlw	0x78
-	retlw	0x4E
-	retlw	0x5C
-	retlw	0x22
-	retlw	0x30
-	retlw	0x06
-	retlw	0x14
-	retlw	0xAC
-	retlw	0xBE
-	retlw	0x88
-	retlw	0x9A
-	retlw	0xE4
-	retlw	0xF6
-	retlw	0xC0
-	retlw	0xD2
-	retlw	0x3C
-	retlw	0x2E
-	retlw	0x18
-	retlw	0x0A
-	retlw	0x74
-	retlw	0x66
-	retlw	0x50
-	retlw	0x42
-	retlw	0x9E
-	retlw	0x8C
-	retlw	0xBA
-	retlw	0xA8
-	retlw	0xD6
-	retlw	0xC4
-	retlw	0xF2
-	retlw	0xE0
-	retlw	0x0E
-	retlw	0x1C
-	retlw	0x2A
-	retlw	0x38
-	retlw	0x46
-	retlw	0x54
-	retlw	0x62
-	retlw	0x70
-	retlw	0x82
-	retlw	0x90
-	retlw	0xA6
-	retlw	0xB4
-	retlw	0xCA
-	retlw	0xD8
-	retlw	0xEE
-	retlw	0xFC
-	retlw	0x12
-	retlw	0x00
-	retlw	0x36
-	retlw	0x24
-	retlw	0x5A
-	retlw	0x48
-	retlw	0x7E
-	retlw	0x6C
-	retlw	0xB0
-	retlw	0xA2
-	retlw	0x94
-	retlw	0x86
-	retlw	0xF8
-	retlw	0xEA
-	retlw	0xDC
-	retlw	0xCE
-	retlw	0x20
-	retlw	0x32
-	retlw	0x04
-	retlw	0x16
-	retlw	0x68
-	retlw	0x7A
-	retlw	0x4C
-	retlw	0x5E
-	retlw	0xE6
-	retlw	0xF4
-	retlw	0xC2
-	retlw	0xD0
-	retlw	0xAE
-	retlw	0xBC
-	retlw	0x8A
-	retlw	0x98
-	retlw	0x76
-	retlw	0x64
-	retlw	0x52
-	retlw	0x40
-	retlw	0x3E
-	retlw	0x2C
-	retlw	0x1A
-	retlw	0x08
-	retlw	0xD4
-	retlw	0xC6
-	retlw	0xF0
-	retlw	0xE2
-	retlw	0x9C
-	retlw	0x8E
-	retlw	0xB8
-	retlw	0xAA
-	retlw	0x44
-	retlw	0x56
-	retlw	0x60
-	retlw	0x72
-	retlw	0x0C
-	retlw	0x1E
-	retlw	0x28
-	retlw	0x3A
-	retlw	0x4A
-	retlw	0x58
-	retlw	0x6E
-	retlw	0x7C
-	retlw	0x02
-	retlw	0x10
-	retlw	0x26
-	retlw	0x34
-	retlw	0xDA
-	retlw	0xC8
-	retlw	0xFE
-	retlw	0xEC
-	retlw	0x92
-	retlw	0x80
-	retlw	0xB6
-	retlw	0xA4
-	retlw	0x78
-	retlw	0x6A
-	retlw	0x5C
-	retlw	0x4E
-	retlw	0x30
-	retlw	0x22
-	retlw	0x14
-	retlw	0x06
-	retlw	0xE8
-	retlw	0xFA
-	retlw	0xCC
-	retlw	0xDE
-	retlw	0xA0
-	retlw	0xB2
-	retlw	0x84
-	retlw	0x96
-	retlw	0x2E
-	retlw	0x3C
-	retlw	0x0A
-	retlw	0x18
-	retlw	0x66
-	retlw	0x74
-	retlw	0x42
-	retlw	0x50
-	retlw	0xBE
-	retlw	0xAC
-	retlw	0x9A
-	retlw	0x88
-	retlw	0xF6
-	retlw	0xE4
-	retlw	0xD2
-	retlw	0xC0
-	retlw	0x1C
-	retlw	0x0E
-	retlw	0x38
-	retlw	0x2A
-	retlw	0x54
-	retlw	0x46
-	retlw	0x70
-	retlw	0x62
-	retlw	0x8C
-	retlw	0x9E
-	retlw	0xA8
-	retlw	0xBA
-	retlw	0xC4
-	retlw	0xD6
-	retlw	0xE0
-	retlw	0xF2
+SelectNext
+	movlw	B'00110010'	;Tristate RD
+	tris	7		; "
+	bcf	PORTA,RA0	;Assert !ENBL for next device in chain
+	btfss	PORTA,RA5	;Spin until our !ENBL goes high
+	bra	$-1		; "
+	bsf	PORTA,RA0	;Deassert !ENBL for next device in chain
 
-	org	0x900
+WaitEnbl
+	movlw	B'00110010'	;Tristate RD
+	tris	7		; "
+	bsf	PORTC,RC4	;Latch a 1 on RD for when we drive it
+	bcf	FLAGS,DEVSEL1	;Select device 0 in the flag bits
+	bcf	FLAGS,DEVSEL0	; "
+	btfsc	PORTA,RA5	;Spin until !ENBL goes low
+	bra	$-1		; "
+	movlw	B'00100010'	;Drive the RD pin, high at first
+	tris	7		; "
 
-LutCrc16H
-	retlw	0x00
-	retlw	0x10
-	retlw	0x20
-	retlw	0x30
-	retlw	0x40
-	retlw	0x50
-	retlw	0x60
-	retlw	0x70
-	retlw	0x81
-	retlw	0x91
-	retlw	0xA1
-	retlw	0xB1
-	retlw	0xC1
-	retlw	0xD1
-	retlw	0xE1
-	retlw	0xF1
-	retlw	0x12
-	retlw	0x02
-	retlw	0x32
-	retlw	0x22
-	retlw	0x52
-	retlw	0x42
-	retlw	0x72
-	retlw	0x62
-	retlw	0x93
-	retlw	0x83
-	retlw	0xB3
-	retlw	0xA3
-	retlw	0xD3
-	retlw	0xC3
-	retlw	0xF3
-	retlw	0xE3
-	retlw	0x24
-	retlw	0x34
-	retlw	0x04
-	retlw	0x14
-	retlw	0x64
-	retlw	0x74
-	retlw	0x44
-	retlw	0x54
-	retlw	0xA5
-	retlw	0xB5
-	retlw	0x85
-	retlw	0x95
-	retlw	0xE5
-	retlw	0xF5
-	retlw	0xC5
-	retlw	0xD5
-	retlw	0x36
-	retlw	0x26
-	retlw	0x16
-	retlw	0x06
-	retlw	0x76
-	retlw	0x66
-	retlw	0x56
-	retlw	0x46
-	retlw	0xB7
-	retlw	0xA7
-	retlw	0x97
-	retlw	0x87
-	retlw	0xF7
-	retlw	0xE7
-	retlw	0xD7
-	retlw	0xC7
-	retlw	0x48
-	retlw	0x58
-	retlw	0x68
-	retlw	0x78
-	retlw	0x08
-	retlw	0x18
-	retlw	0x28
-	retlw	0x38
-	retlw	0xC9
-	retlw	0xD9
-	retlw	0xE9
-	retlw	0xF9
-	retlw	0x89
-	retlw	0x99
-	retlw	0xA9
-	retlw	0xB9
-	retlw	0x5A
-	retlw	0x4A
-	retlw	0x7A
-	retlw	0x6A
-	retlw	0x1A
-	retlw	0x0A
-	retlw	0x3A
-	retlw	0x2A
-	retlw	0xDB
-	retlw	0xCB
-	retlw	0xFB
-	retlw	0xEB
-	retlw	0x9B
-	retlw	0x8B
-	retlw	0xBB
-	retlw	0xAB
-	retlw	0x6C
-	retlw	0x7C
-	retlw	0x4C
-	retlw	0x5C
-	retlw	0x2C
-	retlw	0x3C
-	retlw	0x0C
-	retlw	0x1C
-	retlw	0xED
-	retlw	0xFD
-	retlw	0xCD
-	retlw	0xDD
-	retlw	0xAD
-	retlw	0xBD
-	retlw	0x8D
-	retlw	0x9D
-	retlw	0x7E
-	retlw	0x6E
-	retlw	0x5E
-	retlw	0x4E
-	retlw	0x3E
-	retlw	0x2E
-	retlw	0x1E
-	retlw	0x0E
-	retlw	0xFF
-	retlw	0xEF
-	retlw	0xDF
-	retlw	0xCF
-	retlw	0xBF
-	retlw	0xAF
-	retlw	0x9F
-	retlw	0x8F
-	retlw	0x91
-	retlw	0x81
-	retlw	0xB1
-	retlw	0xA1
-	retlw	0xD1
-	retlw	0xC1
-	retlw	0xF1
-	retlw	0xE1
-	retlw	0x10
-	retlw	0x00
-	retlw	0x30
-	retlw	0x20
-	retlw	0x50
-	retlw	0x40
-	retlw	0x70
-	retlw	0x60
-	retlw	0x83
-	retlw	0x93
-	retlw	0xA3
-	retlw	0xB3
-	retlw	0xC3
-	retlw	0xD3
-	retlw	0xE3
-	retlw	0xF3
-	retlw	0x02
-	retlw	0x12
-	retlw	0x22
-	retlw	0x32
-	retlw	0x42
-	retlw	0x52
-	retlw	0x62
-	retlw	0x72
-	retlw	0xB5
-	retlw	0xA5
-	retlw	0x95
-	retlw	0x85
-	retlw	0xF5
-	retlw	0xE5
-	retlw	0xD5
-	retlw	0xC5
-	retlw	0x34
-	retlw	0x24
-	retlw	0x14
-	retlw	0x04
-	retlw	0x74
-	retlw	0x64
-	retlw	0x54
-	retlw	0x44
-	retlw	0xA7
-	retlw	0xB7
-	retlw	0x87
-	retlw	0x97
-	retlw	0xE7
-	retlw	0xF7
-	retlw	0xC7
-	retlw	0xD7
-	retlw	0x26
-	retlw	0x36
-	retlw	0x06
-	retlw	0x16
-	retlw	0x66
-	retlw	0x76
-	retlw	0x46
-	retlw	0x56
-	retlw	0xD9
-	retlw	0xC9
-	retlw	0xF9
-	retlw	0xE9
-	retlw	0x99
-	retlw	0x89
-	retlw	0xB9
-	retlw	0xA9
-	retlw	0x58
-	retlw	0x48
-	retlw	0x78
-	retlw	0x68
-	retlw	0x18
-	retlw	0x08
-	retlw	0x38
-	retlw	0x28
-	retlw	0xCB
-	retlw	0xDB
-	retlw	0xEB
-	retlw	0xFB
-	retlw	0x8B
-	retlw	0x9B
-	retlw	0xAB
-	retlw	0xBB
-	retlw	0x4A
-	retlw	0x5A
-	retlw	0x6A
-	retlw	0x7A
-	retlw	0x0A
-	retlw	0x1A
-	retlw	0x2A
-	retlw	0x3A
-	retlw	0xFD
-	retlw	0xED
-	retlw	0xDD
-	retlw	0xCD
-	retlw	0xBD
-	retlw	0xAD
-	retlw	0x9D
-	retlw	0x8D
-	retlw	0x7C
-	retlw	0x6C
-	retlw	0x5C
-	retlw	0x4C
-	retlw	0x3C
-	retlw	0x2C
-	retlw	0x1C
-	retlw	0x0C
-	retlw	0xEF
-	retlw	0xFF
-	retlw	0xCF
-	retlw	0xDF
-	retlw	0xAF
-	retlw	0xBF
-	retlw	0x8F
-	retlw	0x9F
-	retlw	0x6E
-	retlw	0x7E
-	retlw	0x4E
-	retlw	0x5E
-	retlw	0x2E
-	retlw	0x3E
-	retlw	0x0E
-	retlw	0x1E
+Dev0Jump
+	decf	PORTA,W		;32 entries in the jump table, each has two
+	brw			; instructions; jump to the one matching state
+Dev0Ph0	bsf	PORTC,RC4	;HOFF is asserted but there's nothing to hold
+	bra	Dev0Jump	; off from, so drive RD high to deassert !HSHK
+Dev0Ph1	bsf	PORTC,RC4	;Mac wants to exchange data for some reason, so
+	bra	Dev0Jump	; drive RD high because what else can we do
+Dev0Ph2	bsf	PORTC,RC4	;Mac wants us to idle, cool, we're already
+	bra	Dev0Jump	; idling, so drive RD high to deassert !HSHK
+Dev0Ph3	call	GetCommand	;Mac wants to send a command, this is the only
+	bra	Dev0Jump	; way to escape the idle loop
+Dev0Ph4	bsf	PORTC,RC4	;Mac wants us to reset, this is sorta reset, so
+	bra	Dev0Jump	; drive RD high to deassert !HSHK 
+Dev0Ph5	bcf	PORTC,RC4	;Mac wants us to drive RD low, so drive RD low
+	bra	Dev0Jump	; "
+Dev0Ph6	bsf	PORTC,RC4	;Mac wants us to drive RD high, so drive RD
+	bra	Dev0Jump	; high
+Dev0Ph7	bsf	PORTC,RC4	;Mac wants us to drive RD high, so drive RD
+	bra	Dev0Jump	; high
+Dev0Ph8	bsf	PORTC,RC4	;Mac wants to talk to next device
+	bra	EnterDev1	; "
+Dev0Ph9	bsf	PORTC,RC4	;Mac wants to talk to next device
+	bra	EnterDev1	; "
+Dev0PhA	bsf	PORTC,RC4	;Mac wants to talk to next device
+	bra	EnterDev1	; "
+Dev0PhB	bsf	PORTC,RC4	;Mac wants to talk to next device
+	bra	EnterDev1	; "
+Dev0PhC	bsf	PORTC,RC4	;Mac wants to talk to next device
+	bra	EnterDev1	; "
+Dev0PhD	bsf	PORTC,RC4	;Mac wants to talk to next device
+	bra	EnterDev1	; "
+Dev0PhE	bsf	PORTC,RC4	;Mac wants to talk to next device
+	bra	EnterDev1	; "
+Dev0PhF	bsf	PORTC,RC4	;Mac wants to talk to next device
+	bra	EnterDev1	; "
+Dev0NEn	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
 
-	org	0xA00
+EnterDev1
+	btfss	FLAGS,DEV1ON	;If there is no device 1, select the next
+	goto	SelectNext	; device and wait for !ENBL to be deasserted
+	bcf	FLAGS,DEVSEL1	;Select device 1 in the flag bits
+	bsf	FLAGS,DEVSEL0	; "
 
-LutCrc16L
-	retlw	0x00
-	retlw	0x21
-	retlw	0x42
-	retlw	0x63
-	retlw	0x84
-	retlw	0xA5
-	retlw	0xC6
-	retlw	0xE7
-	retlw	0x08
-	retlw	0x29
-	retlw	0x4A
-	retlw	0x6B
-	retlw	0x8C
-	retlw	0xAD
-	retlw	0xCE
-	retlw	0xEF
-	retlw	0x31
-	retlw	0x10
-	retlw	0x73
-	retlw	0x52
-	retlw	0xB5
-	retlw	0x94
-	retlw	0xF7
-	retlw	0xD6
-	retlw	0x39
-	retlw	0x18
-	retlw	0x7B
-	retlw	0x5A
-	retlw	0xBD
-	retlw	0x9C
-	retlw	0xFF
-	retlw	0xDE
-	retlw	0x62
-	retlw	0x43
-	retlw	0x20
-	retlw	0x01
-	retlw	0xE6
-	retlw	0xC7
-	retlw	0xA4
-	retlw	0x85
-	retlw	0x6A
-	retlw	0x4B
-	retlw	0x28
-	retlw	0x09
-	retlw	0xEE
-	retlw	0xCF
-	retlw	0xAC
-	retlw	0x8D
-	retlw	0x53
-	retlw	0x72
-	retlw	0x11
-	retlw	0x30
-	retlw	0xD7
-	retlw	0xF6
-	retlw	0x95
-	retlw	0xB4
-	retlw	0x5B
-	retlw	0x7A
-	retlw	0x19
-	retlw	0x38
-	retlw	0xDF
-	retlw	0xFE
-	retlw	0x9D
-	retlw	0xBC
-	retlw	0xC4
-	retlw	0xE5
-	retlw	0x86
-	retlw	0xA7
-	retlw	0x40
-	retlw	0x61
-	retlw	0x02
-	retlw	0x23
-	retlw	0xCC
-	retlw	0xED
-	retlw	0x8E
-	retlw	0xAF
-	retlw	0x48
-	retlw	0x69
-	retlw	0x0A
-	retlw	0x2B
-	retlw	0xF5
-	retlw	0xD4
-	retlw	0xB7
-	retlw	0x96
-	retlw	0x71
-	retlw	0x50
-	retlw	0x33
-	retlw	0x12
-	retlw	0xFD
-	retlw	0xDC
-	retlw	0xBF
-	retlw	0x9E
-	retlw	0x79
-	retlw	0x58
-	retlw	0x3B
-	retlw	0x1A
-	retlw	0xA6
-	retlw	0x87
-	retlw	0xE4
-	retlw	0xC5
-	retlw	0x22
-	retlw	0x03
-	retlw	0x60
-	retlw	0x41
-	retlw	0xAE
-	retlw	0x8F
-	retlw	0xEC
-	retlw	0xCD
-	retlw	0x2A
-	retlw	0x0B
-	retlw	0x68
-	retlw	0x49
-	retlw	0x97
-	retlw	0xB6
-	retlw	0xD5
-	retlw	0xF4
-	retlw	0x13
-	retlw	0x32
-	retlw	0x51
-	retlw	0x70
-	retlw	0x9F
-	retlw	0xBE
-	retlw	0xDD
-	retlw	0xFC
-	retlw	0x1B
-	retlw	0x3A
-	retlw	0x59
-	retlw	0x78
-	retlw	0x88
-	retlw	0xA9
-	retlw	0xCA
-	retlw	0xEB
-	retlw	0x0C
-	retlw	0x2D
-	retlw	0x4E
-	retlw	0x6F
-	retlw	0x80
-	retlw	0xA1
-	retlw	0xC2
-	retlw	0xE3
-	retlw	0x04
-	retlw	0x25
-	retlw	0x46
-	retlw	0x67
-	retlw	0xB9
-	retlw	0x98
-	retlw	0xFB
-	retlw	0xDA
-	retlw	0x3D
-	retlw	0x1C
-	retlw	0x7F
-	retlw	0x5E
-	retlw	0xB1
-	retlw	0x90
-	retlw	0xF3
-	retlw	0xD2
-	retlw	0x35
-	retlw	0x14
-	retlw	0x77
-	retlw	0x56
-	retlw	0xEA
-	retlw	0xCB
-	retlw	0xA8
-	retlw	0x89
-	retlw	0x6E
-	retlw	0x4F
-	retlw	0x2C
-	retlw	0x0D
-	retlw	0xE2
-	retlw	0xC3
-	retlw	0xA0
-	retlw	0x81
-	retlw	0x66
-	retlw	0x47
-	retlw	0x24
-	retlw	0x05
-	retlw	0xDB
-	retlw	0xFA
-	retlw	0x99
-	retlw	0xB8
-	retlw	0x5F
-	retlw	0x7E
-	retlw	0x1D
-	retlw	0x3C
-	retlw	0xD3
-	retlw	0xF2
-	retlw	0x91
-	retlw	0xB0
-	retlw	0x57
-	retlw	0x76
-	retlw	0x15
-	retlw	0x34
-	retlw	0x4C
-	retlw	0x6D
-	retlw	0x0E
-	retlw	0x2F
-	retlw	0xC8
-	retlw	0xE9
-	retlw	0x8A
-	retlw	0xAB
-	retlw	0x44
-	retlw	0x65
-	retlw	0x06
-	retlw	0x27
-	retlw	0xC0
-	retlw	0xE1
-	retlw	0x82
-	retlw	0xA3
-	retlw	0x7D
-	retlw	0x5C
-	retlw	0x3F
-	retlw	0x1E
-	retlw	0xF9
-	retlw	0xD8
-	retlw	0xBB
-	retlw	0x9A
-	retlw	0x75
-	retlw	0x54
-	retlw	0x37
-	retlw	0x16
-	retlw	0xF1
-	retlw	0xD0
-	retlw	0xB3
-	retlw	0x92
-	retlw	0x2E
-	retlw	0x0F
-	retlw	0x6C
-	retlw	0x4D
-	retlw	0xAA
-	retlw	0x8B
-	retlw	0xE8
-	retlw	0xC9
-	retlw	0x26
-	retlw	0x07
-	retlw	0x64
-	retlw	0x45
-	retlw	0xA2
-	retlw	0x83
-	retlw	0xE0
-	retlw	0xC1
-	retlw	0x1F
-	retlw	0x3E
-	retlw	0x5D
-	retlw	0x7C
-	retlw	0x9B
-	retlw	0xBA
-	retlw	0xD9
-	retlw	0xF8
-	retlw	0x17
-	retlw	0x36
-	retlw	0x55
-	retlw	0x74
-	retlw	0x93
-	retlw	0xB2
-	retlw	0xD1
-	retlw	0xF0
+Dev1SelJump
+	decf	PORTA,W		;32 entries in the jump table, each has two
+	brw			; instructions; jump to the one matching state
+Dv1SPh0	bsf	PORTC,RC4	;HOFF is asserted but there's nothing to hold
+	bra	Dev1Jump	; off from, so drive RD high to deassert !HSHK
+Dv1SPh1	bsf	PORTC,RC4	;Mac wants to exchange data for some reason, so
+	bra	Dev1Jump	; drive RD high because what else can we do
+Dv1SPh2	bsf	PORTC,RC4	;Mac wants us to idle, cool, we're already
+	bra	Dev1Jump	; idling, so drive RD high to deassert !HSHK
+Dv1SPh3	call	GetCommand	;Mac wants to send a command, this is the only
+	bra	Dev1Jump	; way to escape the idle loop
+Dv1SPh4	bsf	PORTC,RC4	;Mac wants us to reset, this is sorta reset, so
+	bra	Dev1Jump	; drive RD high to deassert !HSHK 
+Dv1SPh5	bcf	PORTC,RC4	;Mac wants us to drive RD low, so drive RD low
+	bra	Dev1Jump	; "
+Dv1SPh6	bsf	PORTC,RC4	;Mac wants us to drive RD high, so drive RD
+	bra	Dev1Jump	; high
+Dv1SPh7	bsf	PORTC,RC4	;Mac wants us to drive RD high, so drive RD
+	bra	Dev1Jump	; high
+Dv1SPh8	bsf	PORTC,RC4	;HOFF is asserted but there's nothing to hold
+	bra	Dev1SelJump	; off from, so drive RD high to deassert !HSHK
+Dv1SPh9	bsf	PORTC,RC4	;Mac wants to exchange data for some reason, so
+	bra	Dev1SelJump	; drive RD high because what else can we do
+Dv1SPhA	bsf	PORTC,RC4	;Mac wants us to idle, cool, we're already
+	bra	Dev1SelJump	; idling, so drive RD high to deassert !HSHK
+Dv1SPhB	call	GetCommand	;Mac wants to send a command, this is the only
+	bra	Dev1SelJump	; way to escape the idle loop
+Dv1SPhC	bsf	PORTC,RC4	;Mac wants us to reset, this is sorta reset, so
+	bra	Dev1SelJump	; drive RD high to deassert !HSHK 
+Dv1SPhD	bcf	PORTC,RC4	;Mac wants us to drive RD low, so drive RD low
+	bra	Dev1SelJump	; "
+Dv1SPhE	bsf	PORTC,RC4	;Mac wants us to drive RD high, so drive RD
+	bra	Dev1SelJump	; high
+Dv1SPhF	bsf	PORTC,RC4	;Mac wants us to drive RD high, so drive RD
+	bra	Dev1SelJump	; high
+Dv1SNEn	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+
+Dev1Jump
+	decf	PORTA,W		;32 entries in the jump table, each has two
+	brw			; instructions; jump to the one matching state
+Dev1Ph0	bsf	PORTC,RC4	;HOFF is asserted but there's nothing to hold
+	bra	Dev1Jump	; off from, so drive RD high to deassert !HSHK
+Dev1Ph1	bsf	PORTC,RC4	;Mac wants to exchange data for some reason, so
+	bra	Dev1Jump	; drive RD high because what else can we do
+Dev1Ph2	bsf	PORTC,RC4	;Mac wants us to idle, cool, we're already
+	bra	Dev1Jump	; idling, so drive RD high to deassert !HSHK
+Dev1Ph3	call	GetCommand	;Mac wants to send a command, this is the only
+	bra	Dev1Jump	; way to escape the idle loop
+Dev1Ph4	bsf	PORTC,RC4	;Mac wants us to reset, this is sorta reset, so
+	bra	Dev1Jump	; drive RD high to deassert !HSHK 
+Dev1Ph5	bcf	PORTC,RC4	;Mac wants us to drive RD low, so drive RD low
+	bra	Dev1Jump	; "
+Dev1Ph6	bsf	PORTC,RC4	;Mac wants us to drive RD high, so drive RD
+	bra	Dev1Jump	; high
+Dev1Ph7	bsf	PORTC,RC4	;Mac wants us to drive RD high, so drive RD
+	bra	Dev1Jump	; high
+Dev1Ph8	bsf	PORTC,RC4	;Mac wants to talk to next device
+	bra	EnterDev2	; "
+Dev1Ph9	bsf	PORTC,RC4	;Mac wants to talk to next device
+	bra	EnterDev2	; "
+Dev1PhA	bsf	PORTC,RC4	;Mac wants to talk to next device
+	bra	EnterDev2	; "
+Dev1PhB	bsf	PORTC,RC4	;Mac wants to talk to next device
+	bra	EnterDev2	; "
+Dev1PhC	bsf	PORTC,RC4	;Mac wants to talk to next device
+	bra	EnterDev2	; "
+Dev1PhD	bsf	PORTC,RC4	;Mac wants to talk to next device
+	bra	EnterDev2	; "
+Dev1PhE	bsf	PORTC,RC4	;Mac wants to talk to next device
+	bra	EnterDev2	; "
+Dev1PhF	bsf	PORTC,RC4	;Mac wants to talk to next device
+	bra	EnterDev2	; "
+Dev1NEn	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+
+EnterDev2
+	btfss	FLAGS,DEV2ON	;If there is no device 2, select the next
+	goto	SelectNext	; device and wait for !ENBL to be deasserted
+	bsf	FLAGS,DEVSEL1	;Select device 2 in the flag bits
+	bcf	FLAGS,DEVSEL0	; "
+
+Dev2SelJump
+	decf	PORTA,W		;32 entries in the jump table, each has two
+	brw			; instructions; jump to the one matching state
+Dv2SPh0	bsf	PORTC,RC4	;HOFF is asserted but there's nothing to hold
+	bra	Dev2Jump	; off from, so drive RD high to deassert !HSHK
+Dv2SPh1	bsf	PORTC,RC4	;Mac wants to exchange data for some reason, so
+	bra	Dev2Jump	; drive RD high because what else can we do
+Dv2SPh2	bsf	PORTC,RC4	;Mac wants us to idle, cool, we're already
+	bra	Dev2Jump	; idling, so drive RD high to deassert !HSHK
+Dv2SPh3	call	GetCommand	;Mac wants to send a command, this is the only
+	bra	Dev2Jump	; way to escape the idle loop
+Dv2SPh4	bsf	PORTC,RC4	;Mac wants us to reset, this is sorta reset, so
+	bra	Dev2Jump	; drive RD high to deassert !HSHK 
+Dv2SPh5	bcf	PORTC,RC4	;Mac wants us to drive RD low, so drive RD low
+	bra	Dev2Jump	; "
+Dv2SPh6	bsf	PORTC,RC4	;Mac wants us to drive RD high, so drive RD
+	bra	Dev2Jump	; high
+Dv2SPh7	bsf	PORTC,RC4	;Mac wants us to drive RD high, so drive RD
+	bra	Dev2Jump	; high
+Dv2SPh8	bsf	PORTC,RC4	;HOFF is asserted but there's nothing to hold
+	bra	Dev2SelJump	; off from, so drive RD high to deassert !HSHK
+Dv2SPh9	bsf	PORTC,RC4	;Mac wants to exchange data for some reason, so
+	bra	Dev2SelJump	; drive RD high because what else can we do
+Dv2SPhA	bsf	PORTC,RC4	;Mac wants us to idle, cool, we're already
+	bra	Dev2SelJump	; idling, so drive RD high to deassert !HSHK
+Dv2SPhB	call	GetCommand	;Mac wants to send a command, this is the only
+	bra	Dev2SelJump	; way to escape the idle loop
+Dv2SPhC	bsf	PORTC,RC4	;Mac wants us to reset, this is sorta reset, so
+	bra	Dev2SelJump	; drive RD high to deassert !HSHK 
+Dv2SPhD	bcf	PORTC,RC4	;Mac wants us to drive RD low, so drive RD low
+	bra	Dev2SelJump	; "
+Dv2SPhE	bsf	PORTC,RC4	;Mac wants us to drive RD high, so drive RD
+	bra	Dev2SelJump	; high
+Dv2SPhF	bsf	PORTC,RC4	;Mac wants us to drive RD high, so drive RD
+	bra	Dev2SelJump	; high
+Dv2SNEn	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+
+Dev2Jump
+	decf	PORTA,W		;32 entries in the jump table, each has two
+	brw			; instructions; jump to the one matching state
+Dev2Ph0	bsf	PORTC,RC4	;HOFF is asserted but there's nothing to hold
+	bra	Dev2Jump	; off from, so drive RD high to deassert !HSHK
+Dev2Ph1	bsf	PORTC,RC4	;Mac wants to exchange data for some reason, so
+	bra	Dev2Jump	; drive RD high because what else can we do
+Dev2Ph2	bsf	PORTC,RC4	;Mac wants us to idle, cool, we're already
+	bra	Dev2Jump	; idling, so drive RD high to deassert !HSHK
+Dev2Ph3	call	GetCommand	;Mac wants to send a command, this is the only
+	bra	Dev2Jump	; way to escape the idle loop
+Dev2Ph4	bsf	PORTC,RC4	;Mac wants us to reset, this is sorta reset, so
+	bra	Dev2Jump	; drive RD high to deassert !HSHK 
+Dev2Ph5	bcf	PORTC,RC4	;Mac wants us to drive RD low, so drive RD low
+	bra	Dev2Jump	; "
+Dev2Ph6	bsf	PORTC,RC4	;Mac wants us to drive RD high, so drive RD
+	bra	Dev2Jump	; high
+Dev2Ph7	bsf	PORTC,RC4	;Mac wants us to drive RD high, so drive RD
+	bra	Dev2Jump	; high
+Dev2Ph8	bsf	PORTC,RC4	;Mac wants to talk to next device
+	bra	EnterDev3	; "
+Dev2Ph9	bsf	PORTC,RC4	;Mac wants to talk to next device
+	bra	EnterDev3	; "
+Dev2PhA	bsf	PORTC,RC4	;Mac wants to talk to next device
+	bra	EnterDev3	; "
+Dev2PhB	bsf	PORTC,RC4	;Mac wants to talk to next device
+	bra	EnterDev3	; "
+Dev2PhC	bsf	PORTC,RC4	;Mac wants to talk to next device
+	bra	EnterDev3	; "
+Dev2PhD	bsf	PORTC,RC4	;Mac wants to talk to next device
+	bra	EnterDev3	; "
+Dev2PhE	bsf	PORTC,RC4	;Mac wants to talk to next device
+	bra	EnterDev3	; "
+Dev2PhF	bsf	PORTC,RC4	;Mac wants to talk to next device
+	bra	EnterDev3	; "
+Dev2NEn	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+
+EnterDev3
+	btfss	FLAGS,DEV3ON	;If there is no device 3, select the next
+	goto	SelectNext	; device and wait for !ENBL to be deasserted
+	bsf	FLAGS,DEVSEL1	;Select device 3 in the flag bits
+	bsf	FLAGS,DEVSEL0	; "
+
+Dev3SelJump
+	decf	PORTA,W		;32 entries in the jump table, each has two
+	brw			; instructions; jump to the one matching state
+Dv3SPh0	bsf	PORTC,RC4	;HOFF is asserted but there's nothing to hold
+	bra	Dev3Jump	; off from, so drive RD high to deassert !HSHK
+Dv3SPh1	bsf	PORTC,RC4	;Mac wants to exchange data for some reason, so
+	bra	Dev3Jump	; drive RD high because what else can we do
+Dv3SPh2	bsf	PORTC,RC4	;Mac wants us to idle, cool, we're already
+	bra	Dev3Jump	; idling, so drive RD high to deassert !HSHK
+Dv3SPh3	call	GetCommand	;Mac wants to send a command, this is the only
+	bra	Dev3Jump	; way to escape the idle loop
+Dv3SPh4	bsf	PORTC,RC4	;Mac wants us to reset, this is sorta reset, so
+	bra	Dev3Jump	; drive RD high to deassert !HSHK 
+Dv3SPh5	bcf	PORTC,RC4	;Mac wants us to drive RD low, so drive RD low
+	bra	Dev3Jump	; "
+Dv3SPh6	bsf	PORTC,RC4	;Mac wants us to drive RD high, so drive RD
+	bra	Dev3Jump	; high
+Dv3SPh7	bsf	PORTC,RC4	;Mac wants us to drive RD high, so drive RD
+	bra	Dev3Jump	; high
+Dv3SPh8	bsf	PORTC,RC4	;HOFF is asserted but there's nothing to hold
+	bra	Dev3SelJump	; off from, so drive RD high to deassert !HSHK
+Dv3SPh9	bsf	PORTC,RC4	;Mac wants to exchange data for some reason, so
+	bra	Dev3SelJump	; drive RD high because what else can we do
+Dv3SPhA	bsf	PORTC,RC4	;Mac wants us to idle, cool, we're already
+	bra	Dev3SelJump	; idling, so drive RD high to deassert !HSHK
+Dv3SPhB	call	GetCommand	;Mac wants to send a command, this is the only
+	bra	Dev3SelJump	; way to escape the idle loop
+Dv3SPhC	bsf	PORTC,RC4	;Mac wants us to reset, this is sorta reset, so
+	bra	Dev3SelJump	; drive RD high to deassert !HSHK 
+Dv3SPhD	bcf	PORTC,RC4	;Mac wants us to drive RD low, so drive RD low
+	bra	Dev3SelJump	; "
+Dv3SPhE	bsf	PORTC,RC4	;Mac wants us to drive RD high, so drive RD
+	bra	Dev3SelJump	; high
+Dv3SPhF	bsf	PORTC,RC4	;Mac wants us to drive RD high, so drive RD
+	bra	Dev3SelJump	; high
+Dv3SNEn	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+
+Dev3Jump
+	decf	PORTA,W		;32 entries in the jump table, each has two
+	brw			; instructions; jump to the one matching state
+Dev3Ph0	bsf	PORTC,RC4	;HOFF is asserted but there's nothing to hold
+	bra	Dev3Jump	; off from, so drive RD high to deassert !HSHK
+Dev3Ph1	bsf	PORTC,RC4	;Mac wants to exchange data for some reason, so
+	bra	Dev3Jump	; drive RD high because what else can we do
+Dev3Ph2	bsf	PORTC,RC4	;Mac wants us to idle, cool, we're already
+	bra	Dev3Jump	; idling, so drive RD high to deassert !HSHK
+Dev3Ph3	call	GetCommand	;Mac wants to send a command, this is the only
+	bra	Dev3Jump	; way to escape the idle loop
+Dev3Ph4	bsf	PORTC,RC4	;Mac wants us to reset, this is sorta reset, so
+	bra	Dev3Jump	; drive RD high to deassert !HSHK 
+Dev3Ph5	bcf	PORTC,RC4	;Mac wants us to drive RD low, so drive RD low
+	bra	Dev3Jump	; "
+Dev3Ph6	bsf	PORTC,RC4	;Mac wants us to drive RD high, so drive RD
+	bra	Dev3Jump	; high
+Dev3Ph7	bsf	PORTC,RC4	;Mac wants us to drive RD high, so drive RD
+	bra	Dev3Jump	; high
+Dev3Ph8	bsf	PORTC,RC4	;Mac wants to talk to next device, we have none
+	goto	SelectNext	; so select the next and await !ENBL deasserted
+Dev3Ph9	bsf	PORTC,RC4	;Mac wants to talk to next device, we have none
+	goto	SelectNext	; so select the next and await !ENBL deasserted
+Dev3PhA	bsf	PORTC,RC4	;Mac wants to talk to next device, we have none
+	goto	SelectNext	; so select the next and await !ENBL deasserted
+Dev3PhB	bsf	PORTC,RC4	;Mac wants to talk to next device, we have none
+	goto	SelectNext	; so select the next and await !ENBL deasserted
+Dev3PhC	bsf	PORTC,RC4	;Mac wants to talk to next device, we have none
+	goto	SelectNext	; so select the next and await !ENBL deasserted
+Dev3PhD	bsf	PORTC,RC4	;Mac wants to talk to next device, we have none
+	goto	SelectNext	; so select the next and await !ENBL deasserted
+Dev3PhE	bsf	PORTC,RC4	;Mac wants to talk to next device, we have none
+	goto	SelectNext	; so select the next and await !ENBL deasserted
+Dev3PhF	bsf	PORTC,RC4	;Mac wants to talk to next device, we have none
+	goto	SelectNext	; so select the next and await !ENBL deasserted
+Dev3NEn	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
+	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
+	nop			; and wait for it to be asserted again
 
 
 ;;; Transmitter Code ;;;
@@ -1900,12 +1580,12 @@ Transmit
 	movlp	high Transmit	;Point PCLATH to this page so gotos work
 	movlb	0		;Point BSR to 0 so we can access PORTA/PORTC
 	bcf	FLAGS,ABORTED	;Clear aborted flag to start
-	movf	PORTA,W		;Check the current state
+	decf	PORTA,W		;Check the current state
 	xorlw	B'00000100'	;If it's 2, then mac is ready for us to request
 	btfss	STATUS,Z	; to send; if it's anything else, signal an
 	goto	XAbort		; abort to get us to the idle jump table ASAP
 	bcf	PORTC,RC4	;Assert !HSHK to request to send
-Transm0	movf	PORTA,W		;Check the current state
+Transm0	decf	PORTA,W		;Check the current state
 	xorlw	B'00000100'	;If we're still in state 2, keep checking
 	btfsc	STATUS,Z	; "
 	bra	Transm0		; "
@@ -1928,11 +1608,11 @@ XSyncLp	bcf	PORTC,RC4	; 0 IWM listens to falling edges only
 	btfsc	STATUS,C	;+3  cycles plus 16/47 of a cycle, approximated
 	bra	$+1		;+4  here as 87/256 of a cycle
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -1943,11 +1623,11 @@ XSyncLp	bcf	PORTC,RC4	; 0 IWM listens to falling edges only
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -1958,11 +1638,11 @@ XSyncLp	bcf	PORTC,RC4	; 0 IWM listens to falling edges only
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -1973,11 +1653,11 @@ XSyncLp	bcf	PORTC,RC4	; 0 IWM listens to falling edges only
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -1988,11 +1668,11 @@ XSyncLp	bcf	PORTC,RC4	; 0 IWM listens to falling edges only
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2003,11 +1683,11 @@ XSyncLp	bcf	PORTC,RC4	; 0 IWM listens to falling edges only
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2018,11 +1698,11 @@ XSyncLp	bcf	PORTC,RC4	; 0 IWM listens to falling edges only
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2033,11 +1713,11 @@ XSyncLp	bcf	PORTC,RC4	; 0 IWM listens to falling edges only
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2048,11 +1728,11 @@ XSyncLp	bcf	PORTC,RC4	; 0 IWM listens to falling edges only
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2063,7 +1743,7 @@ XSyncLp	bcf	PORTC,RC4	; 0 IWM listens to falling edges only
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
@@ -2078,11 +1758,11 @@ XSync	bcf	PORTC,RC4	; 0 Start of 0xAA sync byte
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the byte; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the byte; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2093,11 +1773,11 @@ XSync	bcf	PORTC,RC4	; 0 Start of 0xAA sync byte
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the byte; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the byte; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2108,11 +1788,11 @@ XSync	bcf	PORTC,RC4	; 0 Start of 0xAA sync byte
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the byte; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the byte; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2123,11 +1803,11 @@ XSync	bcf	PORTC,RC4	; 0 Start of 0xAA sync byte
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the byte; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the byte; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2138,11 +1818,11 @@ XSync	bcf	PORTC,RC4	; 0 Start of 0xAA sync byte
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the byte; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the byte; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2153,11 +1833,11 @@ XSync	bcf	PORTC,RC4	; 0 Start of 0xAA sync byte
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the byte; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the byte; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2168,11 +1848,11 @@ XSync	bcf	PORTC,RC4	; 0 Start of 0xAA sync byte
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the byte; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the byte; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2183,11 +1863,11 @@ XSync	bcf	PORTC,RC4	; 0 Start of 0xAA sync byte
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the byte; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the byte; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2198,11 +1878,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2214,11 +1894,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2230,11 +1910,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2246,11 +1926,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2262,11 +1942,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2278,11 +1958,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2294,11 +1974,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2310,11 +1990,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2325,11 +2005,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2341,11 +2021,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2357,11 +2037,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2373,11 +2053,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2389,11 +2069,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2405,11 +2085,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2421,11 +2101,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2437,11 +2117,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2452,11 +2132,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2468,11 +2148,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2484,11 +2164,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2500,11 +2180,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2516,11 +2196,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2532,11 +2212,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2548,11 +2228,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2564,11 +2244,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2579,11 +2259,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2595,11 +2275,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2611,11 +2291,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2627,11 +2307,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2643,11 +2323,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2659,11 +2339,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2675,11 +2355,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2691,11 +2371,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2706,11 +2386,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2722,11 +2402,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2738,11 +2418,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2754,11 +2434,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2770,11 +2450,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2786,11 +2466,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2802,11 +2482,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2818,11 +2498,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2833,11 +2513,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2849,11 +2529,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2865,11 +2545,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2881,11 +2561,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2897,11 +2577,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2913,11 +2593,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2929,11 +2609,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2945,11 +2625,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2960,11 +2640,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2976,11 +2656,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -2992,11 +2672,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -3008,11 +2688,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -3024,11 +2704,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -3040,11 +2720,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -3056,11 +2736,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -3072,11 +2752,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -3087,11 +2767,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -3103,11 +2783,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -3119,11 +2799,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -3135,11 +2815,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -3151,11 +2831,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -3167,11 +2847,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -3183,11 +2863,11 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movf	PORTA,W		;+6 Check the current state
+	decf	PORTA,W		;+6 Check the current state
 	andlw	B'00111100'	;+7 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-8  continue transmitting the group; else,
 	goto	XAbort		;-7  abort and get us back to idle loop ASAP
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	andlw	B'00111100'	;-5 If it is 0 (holdoff) or 1 (communication),
 	btfss	STATUS,Z	;-4  continue transmitting the group; else,
 	goto	XAbort		;-3  abort and get us back to idle loop ASAP
@@ -3203,7 +2883,7 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	addwf	FSR0L,F		;+7  the next group
 	movlw	0		;-8  "
 	addwfc	FSR0H,F		;-7  "
-	movf	PORTA,W		;-6 Check the current state
+	decf	PORTA,W		;-6 Check the current state
 	btfsc	STATUS,Z	;-5 If it's 0 (holdoff), then effect a suspend
 	bra	XSuspend	;-4  now that we're done transmitting a group
 	decfsz	GROUPS,F	;-3 We finished a group, decrement group count;
@@ -3211,7 +2891,7 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	;fall through
 
 XFinished
-	movf	PORTA,W		;Check the current state
+	decf	PORTA,W		;Check the current state
 	xorlw	B'00000010'	;If it's still 1 (communication), mac hasn't
 	btfsc	STATUS,Z	; realized we're done transmitting yet, so loop
 	bra	XFinished	; "
@@ -3226,7 +2906,7 @@ XFinished
 
 XSuspend
 	decf	GROUPS,F	;We finished a group, so decrement group count
-XSuspe0	movf	PORTA,W		;Check the current state
+XSuspe0	decf	PORTA,W		;Check the current state
 	btfsc	STATUS,Z	;If it's 0 (holdoff), mac is still asking us to
 	bra	XSuspe0		; hold off, so loop again
 	xorlw	B'00000010'	;If it's anything else but 1 (communication),
@@ -3270,7 +2950,7 @@ Receive
 	clrf	FSR0L		; "
 	clrf	FSR1L		; "
 	clrf	GROUPS		;Clear counter of total received groups
-Receiv0	movf	PORTA,W		;Check the current state
+Receiv0	decf	PORTA,W		;Check the current state
 	xorlw	B'00000100'	;If it's 2, then mac hasn't said it's ready to
 	btfsc	STATUS,Z	; send yet, keep waiting
 	bra	Receiv0		; "
@@ -3278,7 +2958,7 @@ Receiv0	movf	PORTA,W		;Check the current state
 	btfss	STATUS,Z	; if it's anything else, we can't handle it
 	bra	RecvAbort	; here so return to the idle jump table
 	bcf	PORTC,RC4	;Assert !HSHK to say we're ready to receive
-Receiv1	movf	PORTA,W		;If we're still in state 3, keep checking
+Receiv1	decf	PORTA,W		;If we're still in state 3, keep checking
 	xorlw	B'00000110'	; "
 	btfsc	STATUS,Z	; "
 	bra	Receiv1		; "
@@ -4473,6 +4153,789 @@ RDSusLp	moviw	FSR0++		;Read the next byte, and if it's a sync byte,
 	bra	RDSusLp		; the edge of linear memory before we loop
 	bsf	FLAGS,ABORTED	; to check the next byte; if we have, set the
 	return			; aborted flag and return
+
+
+;;; CRC Lookup Tables ;;;
+
+	org	0x1D00
+
+LutCrc7
+	retlw	0x00
+	retlw	0x12
+	retlw	0x24
+	retlw	0x36
+	retlw	0x48
+	retlw	0x5A
+	retlw	0x6C
+	retlw	0x7E
+	retlw	0x90
+	retlw	0x82
+	retlw	0xB4
+	retlw	0xA6
+	retlw	0xD8
+	retlw	0xCA
+	retlw	0xFC
+	retlw	0xEE
+	retlw	0x32
+	retlw	0x20
+	retlw	0x16
+	retlw	0x04
+	retlw	0x7A
+	retlw	0x68
+	retlw	0x5E
+	retlw	0x4C
+	retlw	0xA2
+	retlw	0xB0
+	retlw	0x86
+	retlw	0x94
+	retlw	0xEA
+	retlw	0xF8
+	retlw	0xCE
+	retlw	0xDC
+	retlw	0x64
+	retlw	0x76
+	retlw	0x40
+	retlw	0x52
+	retlw	0x2C
+	retlw	0x3E
+	retlw	0x08
+	retlw	0x1A
+	retlw	0xF4
+	retlw	0xE6
+	retlw	0xD0
+	retlw	0xC2
+	retlw	0xBC
+	retlw	0xAE
+	retlw	0x98
+	retlw	0x8A
+	retlw	0x56
+	retlw	0x44
+	retlw	0x72
+	retlw	0x60
+	retlw	0x1E
+	retlw	0x0C
+	retlw	0x3A
+	retlw	0x28
+	retlw	0xC6
+	retlw	0xD4
+	retlw	0xE2
+	retlw	0xF0
+	retlw	0x8E
+	retlw	0x9C
+	retlw	0xAA
+	retlw	0xB8
+	retlw	0xC8
+	retlw	0xDA
+	retlw	0xEC
+	retlw	0xFE
+	retlw	0x80
+	retlw	0x92
+	retlw	0xA4
+	retlw	0xB6
+	retlw	0x58
+	retlw	0x4A
+	retlw	0x7C
+	retlw	0x6E
+	retlw	0x10
+	retlw	0x02
+	retlw	0x34
+	retlw	0x26
+	retlw	0xFA
+	retlw	0xE8
+	retlw	0xDE
+	retlw	0xCC
+	retlw	0xB2
+	retlw	0xA0
+	retlw	0x96
+	retlw	0x84
+	retlw	0x6A
+	retlw	0x78
+	retlw	0x4E
+	retlw	0x5C
+	retlw	0x22
+	retlw	0x30
+	retlw	0x06
+	retlw	0x14
+	retlw	0xAC
+	retlw	0xBE
+	retlw	0x88
+	retlw	0x9A
+	retlw	0xE4
+	retlw	0xF6
+	retlw	0xC0
+	retlw	0xD2
+	retlw	0x3C
+	retlw	0x2E
+	retlw	0x18
+	retlw	0x0A
+	retlw	0x74
+	retlw	0x66
+	retlw	0x50
+	retlw	0x42
+	retlw	0x9E
+	retlw	0x8C
+	retlw	0xBA
+	retlw	0xA8
+	retlw	0xD6
+	retlw	0xC4
+	retlw	0xF2
+	retlw	0xE0
+	retlw	0x0E
+	retlw	0x1C
+	retlw	0x2A
+	retlw	0x38
+	retlw	0x46
+	retlw	0x54
+	retlw	0x62
+	retlw	0x70
+	retlw	0x82
+	retlw	0x90
+	retlw	0xA6
+	retlw	0xB4
+	retlw	0xCA
+	retlw	0xD8
+	retlw	0xEE
+	retlw	0xFC
+	retlw	0x12
+	retlw	0x00
+	retlw	0x36
+	retlw	0x24
+	retlw	0x5A
+	retlw	0x48
+	retlw	0x7E
+	retlw	0x6C
+	retlw	0xB0
+	retlw	0xA2
+	retlw	0x94
+	retlw	0x86
+	retlw	0xF8
+	retlw	0xEA
+	retlw	0xDC
+	retlw	0xCE
+	retlw	0x20
+	retlw	0x32
+	retlw	0x04
+	retlw	0x16
+	retlw	0x68
+	retlw	0x7A
+	retlw	0x4C
+	retlw	0x5E
+	retlw	0xE6
+	retlw	0xF4
+	retlw	0xC2
+	retlw	0xD0
+	retlw	0xAE
+	retlw	0xBC
+	retlw	0x8A
+	retlw	0x98
+	retlw	0x76
+	retlw	0x64
+	retlw	0x52
+	retlw	0x40
+	retlw	0x3E
+	retlw	0x2C
+	retlw	0x1A
+	retlw	0x08
+	retlw	0xD4
+	retlw	0xC6
+	retlw	0xF0
+	retlw	0xE2
+	retlw	0x9C
+	retlw	0x8E
+	retlw	0xB8
+	retlw	0xAA
+	retlw	0x44
+	retlw	0x56
+	retlw	0x60
+	retlw	0x72
+	retlw	0x0C
+	retlw	0x1E
+	retlw	0x28
+	retlw	0x3A
+	retlw	0x4A
+	retlw	0x58
+	retlw	0x6E
+	retlw	0x7C
+	retlw	0x02
+	retlw	0x10
+	retlw	0x26
+	retlw	0x34
+	retlw	0xDA
+	retlw	0xC8
+	retlw	0xFE
+	retlw	0xEC
+	retlw	0x92
+	retlw	0x80
+	retlw	0xB6
+	retlw	0xA4
+	retlw	0x78
+	retlw	0x6A
+	retlw	0x5C
+	retlw	0x4E
+	retlw	0x30
+	retlw	0x22
+	retlw	0x14
+	retlw	0x06
+	retlw	0xE8
+	retlw	0xFA
+	retlw	0xCC
+	retlw	0xDE
+	retlw	0xA0
+	retlw	0xB2
+	retlw	0x84
+	retlw	0x96
+	retlw	0x2E
+	retlw	0x3C
+	retlw	0x0A
+	retlw	0x18
+	retlw	0x66
+	retlw	0x74
+	retlw	0x42
+	retlw	0x50
+	retlw	0xBE
+	retlw	0xAC
+	retlw	0x9A
+	retlw	0x88
+	retlw	0xF6
+	retlw	0xE4
+	retlw	0xD2
+	retlw	0xC0
+	retlw	0x1C
+	retlw	0x0E
+	retlw	0x38
+	retlw	0x2A
+	retlw	0x54
+	retlw	0x46
+	retlw	0x70
+	retlw	0x62
+	retlw	0x8C
+	retlw	0x9E
+	retlw	0xA8
+	retlw	0xBA
+	retlw	0xC4
+	retlw	0xD6
+	retlw	0xE0
+	retlw	0xF2
+
+	org	0x1E00
+
+LutCrc16H
+	retlw	0x00
+	retlw	0x10
+	retlw	0x20
+	retlw	0x30
+	retlw	0x40
+	retlw	0x50
+	retlw	0x60
+	retlw	0x70
+	retlw	0x81
+	retlw	0x91
+	retlw	0xA1
+	retlw	0xB1
+	retlw	0xC1
+	retlw	0xD1
+	retlw	0xE1
+	retlw	0xF1
+	retlw	0x12
+	retlw	0x02
+	retlw	0x32
+	retlw	0x22
+	retlw	0x52
+	retlw	0x42
+	retlw	0x72
+	retlw	0x62
+	retlw	0x93
+	retlw	0x83
+	retlw	0xB3
+	retlw	0xA3
+	retlw	0xD3
+	retlw	0xC3
+	retlw	0xF3
+	retlw	0xE3
+	retlw	0x24
+	retlw	0x34
+	retlw	0x04
+	retlw	0x14
+	retlw	0x64
+	retlw	0x74
+	retlw	0x44
+	retlw	0x54
+	retlw	0xA5
+	retlw	0xB5
+	retlw	0x85
+	retlw	0x95
+	retlw	0xE5
+	retlw	0xF5
+	retlw	0xC5
+	retlw	0xD5
+	retlw	0x36
+	retlw	0x26
+	retlw	0x16
+	retlw	0x06
+	retlw	0x76
+	retlw	0x66
+	retlw	0x56
+	retlw	0x46
+	retlw	0xB7
+	retlw	0xA7
+	retlw	0x97
+	retlw	0x87
+	retlw	0xF7
+	retlw	0xE7
+	retlw	0xD7
+	retlw	0xC7
+	retlw	0x48
+	retlw	0x58
+	retlw	0x68
+	retlw	0x78
+	retlw	0x08
+	retlw	0x18
+	retlw	0x28
+	retlw	0x38
+	retlw	0xC9
+	retlw	0xD9
+	retlw	0xE9
+	retlw	0xF9
+	retlw	0x89
+	retlw	0x99
+	retlw	0xA9
+	retlw	0xB9
+	retlw	0x5A
+	retlw	0x4A
+	retlw	0x7A
+	retlw	0x6A
+	retlw	0x1A
+	retlw	0x0A
+	retlw	0x3A
+	retlw	0x2A
+	retlw	0xDB
+	retlw	0xCB
+	retlw	0xFB
+	retlw	0xEB
+	retlw	0x9B
+	retlw	0x8B
+	retlw	0xBB
+	retlw	0xAB
+	retlw	0x6C
+	retlw	0x7C
+	retlw	0x4C
+	retlw	0x5C
+	retlw	0x2C
+	retlw	0x3C
+	retlw	0x0C
+	retlw	0x1C
+	retlw	0xED
+	retlw	0xFD
+	retlw	0xCD
+	retlw	0xDD
+	retlw	0xAD
+	retlw	0xBD
+	retlw	0x8D
+	retlw	0x9D
+	retlw	0x7E
+	retlw	0x6E
+	retlw	0x5E
+	retlw	0x4E
+	retlw	0x3E
+	retlw	0x2E
+	retlw	0x1E
+	retlw	0x0E
+	retlw	0xFF
+	retlw	0xEF
+	retlw	0xDF
+	retlw	0xCF
+	retlw	0xBF
+	retlw	0xAF
+	retlw	0x9F
+	retlw	0x8F
+	retlw	0x91
+	retlw	0x81
+	retlw	0xB1
+	retlw	0xA1
+	retlw	0xD1
+	retlw	0xC1
+	retlw	0xF1
+	retlw	0xE1
+	retlw	0x10
+	retlw	0x00
+	retlw	0x30
+	retlw	0x20
+	retlw	0x50
+	retlw	0x40
+	retlw	0x70
+	retlw	0x60
+	retlw	0x83
+	retlw	0x93
+	retlw	0xA3
+	retlw	0xB3
+	retlw	0xC3
+	retlw	0xD3
+	retlw	0xE3
+	retlw	0xF3
+	retlw	0x02
+	retlw	0x12
+	retlw	0x22
+	retlw	0x32
+	retlw	0x42
+	retlw	0x52
+	retlw	0x62
+	retlw	0x72
+	retlw	0xB5
+	retlw	0xA5
+	retlw	0x95
+	retlw	0x85
+	retlw	0xF5
+	retlw	0xE5
+	retlw	0xD5
+	retlw	0xC5
+	retlw	0x34
+	retlw	0x24
+	retlw	0x14
+	retlw	0x04
+	retlw	0x74
+	retlw	0x64
+	retlw	0x54
+	retlw	0x44
+	retlw	0xA7
+	retlw	0xB7
+	retlw	0x87
+	retlw	0x97
+	retlw	0xE7
+	retlw	0xF7
+	retlw	0xC7
+	retlw	0xD7
+	retlw	0x26
+	retlw	0x36
+	retlw	0x06
+	retlw	0x16
+	retlw	0x66
+	retlw	0x76
+	retlw	0x46
+	retlw	0x56
+	retlw	0xD9
+	retlw	0xC9
+	retlw	0xF9
+	retlw	0xE9
+	retlw	0x99
+	retlw	0x89
+	retlw	0xB9
+	retlw	0xA9
+	retlw	0x58
+	retlw	0x48
+	retlw	0x78
+	retlw	0x68
+	retlw	0x18
+	retlw	0x08
+	retlw	0x38
+	retlw	0x28
+	retlw	0xCB
+	retlw	0xDB
+	retlw	0xEB
+	retlw	0xFB
+	retlw	0x8B
+	retlw	0x9B
+	retlw	0xAB
+	retlw	0xBB
+	retlw	0x4A
+	retlw	0x5A
+	retlw	0x6A
+	retlw	0x7A
+	retlw	0x0A
+	retlw	0x1A
+	retlw	0x2A
+	retlw	0x3A
+	retlw	0xFD
+	retlw	0xED
+	retlw	0xDD
+	retlw	0xCD
+	retlw	0xBD
+	retlw	0xAD
+	retlw	0x9D
+	retlw	0x8D
+	retlw	0x7C
+	retlw	0x6C
+	retlw	0x5C
+	retlw	0x4C
+	retlw	0x3C
+	retlw	0x2C
+	retlw	0x1C
+	retlw	0x0C
+	retlw	0xEF
+	retlw	0xFF
+	retlw	0xCF
+	retlw	0xDF
+	retlw	0xAF
+	retlw	0xBF
+	retlw	0x8F
+	retlw	0x9F
+	retlw	0x6E
+	retlw	0x7E
+	retlw	0x4E
+	retlw	0x5E
+	retlw	0x2E
+	retlw	0x3E
+	retlw	0x0E
+	retlw	0x1E
+
+	org	0x1F00
+
+LutCrc16L
+	retlw	0x00
+	retlw	0x21
+	retlw	0x42
+	retlw	0x63
+	retlw	0x84
+	retlw	0xA5
+	retlw	0xC6
+	retlw	0xE7
+	retlw	0x08
+	retlw	0x29
+	retlw	0x4A
+	retlw	0x6B
+	retlw	0x8C
+	retlw	0xAD
+	retlw	0xCE
+	retlw	0xEF
+	retlw	0x31
+	retlw	0x10
+	retlw	0x73
+	retlw	0x52
+	retlw	0xB5
+	retlw	0x94
+	retlw	0xF7
+	retlw	0xD6
+	retlw	0x39
+	retlw	0x18
+	retlw	0x7B
+	retlw	0x5A
+	retlw	0xBD
+	retlw	0x9C
+	retlw	0xFF
+	retlw	0xDE
+	retlw	0x62
+	retlw	0x43
+	retlw	0x20
+	retlw	0x01
+	retlw	0xE6
+	retlw	0xC7
+	retlw	0xA4
+	retlw	0x85
+	retlw	0x6A
+	retlw	0x4B
+	retlw	0x28
+	retlw	0x09
+	retlw	0xEE
+	retlw	0xCF
+	retlw	0xAC
+	retlw	0x8D
+	retlw	0x53
+	retlw	0x72
+	retlw	0x11
+	retlw	0x30
+	retlw	0xD7
+	retlw	0xF6
+	retlw	0x95
+	retlw	0xB4
+	retlw	0x5B
+	retlw	0x7A
+	retlw	0x19
+	retlw	0x38
+	retlw	0xDF
+	retlw	0xFE
+	retlw	0x9D
+	retlw	0xBC
+	retlw	0xC4
+	retlw	0xE5
+	retlw	0x86
+	retlw	0xA7
+	retlw	0x40
+	retlw	0x61
+	retlw	0x02
+	retlw	0x23
+	retlw	0xCC
+	retlw	0xED
+	retlw	0x8E
+	retlw	0xAF
+	retlw	0x48
+	retlw	0x69
+	retlw	0x0A
+	retlw	0x2B
+	retlw	0xF5
+	retlw	0xD4
+	retlw	0xB7
+	retlw	0x96
+	retlw	0x71
+	retlw	0x50
+	retlw	0x33
+	retlw	0x12
+	retlw	0xFD
+	retlw	0xDC
+	retlw	0xBF
+	retlw	0x9E
+	retlw	0x79
+	retlw	0x58
+	retlw	0x3B
+	retlw	0x1A
+	retlw	0xA6
+	retlw	0x87
+	retlw	0xE4
+	retlw	0xC5
+	retlw	0x22
+	retlw	0x03
+	retlw	0x60
+	retlw	0x41
+	retlw	0xAE
+	retlw	0x8F
+	retlw	0xEC
+	retlw	0xCD
+	retlw	0x2A
+	retlw	0x0B
+	retlw	0x68
+	retlw	0x49
+	retlw	0x97
+	retlw	0xB6
+	retlw	0xD5
+	retlw	0xF4
+	retlw	0x13
+	retlw	0x32
+	retlw	0x51
+	retlw	0x70
+	retlw	0x9F
+	retlw	0xBE
+	retlw	0xDD
+	retlw	0xFC
+	retlw	0x1B
+	retlw	0x3A
+	retlw	0x59
+	retlw	0x78
+	retlw	0x88
+	retlw	0xA9
+	retlw	0xCA
+	retlw	0xEB
+	retlw	0x0C
+	retlw	0x2D
+	retlw	0x4E
+	retlw	0x6F
+	retlw	0x80
+	retlw	0xA1
+	retlw	0xC2
+	retlw	0xE3
+	retlw	0x04
+	retlw	0x25
+	retlw	0x46
+	retlw	0x67
+	retlw	0xB9
+	retlw	0x98
+	retlw	0xFB
+	retlw	0xDA
+	retlw	0x3D
+	retlw	0x1C
+	retlw	0x7F
+	retlw	0x5E
+	retlw	0xB1
+	retlw	0x90
+	retlw	0xF3
+	retlw	0xD2
+	retlw	0x35
+	retlw	0x14
+	retlw	0x77
+	retlw	0x56
+	retlw	0xEA
+	retlw	0xCB
+	retlw	0xA8
+	retlw	0x89
+	retlw	0x6E
+	retlw	0x4F
+	retlw	0x2C
+	retlw	0x0D
+	retlw	0xE2
+	retlw	0xC3
+	retlw	0xA0
+	retlw	0x81
+	retlw	0x66
+	retlw	0x47
+	retlw	0x24
+	retlw	0x05
+	retlw	0xDB
+	retlw	0xFA
+	retlw	0x99
+	retlw	0xB8
+	retlw	0x5F
+	retlw	0x7E
+	retlw	0x1D
+	retlw	0x3C
+	retlw	0xD3
+	retlw	0xF2
+	retlw	0x91
+	retlw	0xB0
+	retlw	0x57
+	retlw	0x76
+	retlw	0x15
+	retlw	0x34
+	retlw	0x4C
+	retlw	0x6D
+	retlw	0x0E
+	retlw	0x2F
+	retlw	0xC8
+	retlw	0xE9
+	retlw	0x8A
+	retlw	0xAB
+	retlw	0x44
+	retlw	0x65
+	retlw	0x06
+	retlw	0x27
+	retlw	0xC0
+	retlw	0xE1
+	retlw	0x82
+	retlw	0xA3
+	retlw	0x7D
+	retlw	0x5C
+	retlw	0x3F
+	retlw	0x1E
+	retlw	0xF9
+	retlw	0xD8
+	retlw	0xBB
+	retlw	0x9A
+	retlw	0x75
+	retlw	0x54
+	retlw	0x37
+	retlw	0x16
+	retlw	0xF1
+	retlw	0xD0
+	retlw	0xB3
+	retlw	0x92
+	retlw	0x2E
+	retlw	0x0F
+	retlw	0x6C
+	retlw	0x4D
+	retlw	0xAA
+	retlw	0x8B
+	retlw	0xE8
+	retlw	0xC9
+	retlw	0x26
+	retlw	0x07
+	retlw	0x64
+	retlw	0x45
+	retlw	0xA2
+	retlw	0x83
+	retlw	0xE0
+	retlw	0xC1
+	retlw	0x1F
+	retlw	0x3E
+	retlw	0x5D
+	retlw	0x7C
+	retlw	0x9B
+	retlw	0xBA
+	retlw	0xD9
+	retlw	0xF8
+	retlw	0x17
+	retlw	0x36
+	retlw	0x55
+	retlw	0x74
+	retlw	0x93
+	retlw	0xB2
+	retlw	0xD1
+	retlw	0xF0
 
 
 ;;; End of Program ;;;
