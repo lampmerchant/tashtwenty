@@ -76,18 +76,22 @@ DNOP	macro
 
 ;;; Constants ;;;
 
+;FLAGS:
 ABORTED	equ	7	;Set if a transmit or receive operation was aborted
-DEV3ON	equ	4	;Set if we're emulating a fourth device
-DEV2ON	equ	3	;Set if we're emulating a third device
-DEV1ON	equ	2	;Set if we're emulating a second device
+RNFERR	equ	6	;Set if host tries to access a too-high block address
 DEVSEL1	equ	1	;MSB of which device is selected
 DEVSEL0	equ	0	;LSB of which device is selected
 
+;M_FLAGS:
 M_FAIL	equ	7	;Set when there's been a failure on the MMC interface
 M_CMDLR	equ	6	;Set when R3 or R7 is expected (5 bytes), not R1
 M_CMDRB	equ	5	;Set when an R1b is expected (busy signal after reply)
 M_MBRD	equ	4	;Set when a multiblock read is in progress
 M_MBWR	equ	3	;Set when a multiblock write is in progress
+M_BKADR	equ	2	;Set when block (rather than byte) addressing is in use
+
+;DVxFLAG:
+DV_EXST	equ	7	;Set when device exists
 
 
 ;;; Variable Storage ;;;
@@ -107,13 +111,50 @@ M_MBWR	equ	3	;Set when a multiblock write is in progress
 	M_CRC	;CRC byte of the command to be sent
 	TEMP	;Various purposes
 	TEMP2	;Various purposes
-	TEMP3	;Various purposes
+	D2
 	D1
 	D0
 	
 	endc
 
-	cblock	0x20	;Bank 0 registers (receive shorthand)
+	cblock	0x20	;Bank 0 registers
+	
+	DV0FLAG	;Device 0 flags
+	DV0LN_2	;Device 0 LBA length
+	DV0LN_1	; "
+	DV0LN_0	; "
+	DV0ST_3	;Device 0 start LBA
+	DV0ST_2	; "
+	DV0ST_1	; "
+	DV0ST_0	; "
+	DV1FLAG	;Device 1 flags
+	DV1LN_2	;Device 1 LBA length
+	DV1LN_1	; "
+	DV1LN_0	; "
+	DV1ST_3	;Device 1 start LBA
+	DV1ST_2	; "
+	DV1ST_1	; "
+	DV1ST_0	; "
+	DV2FLAG	;Device 2 flags
+	DV2LN_2	;Device 2 LBA length
+	DV2LN_1	; "
+	DV2LN_0	; "
+	DV2ST_3	;Device 2 start LBA
+	DV2ST_2	; "
+	DV2ST_1	; "
+	DV2ST_0	; "
+	DV3FLAG	;Device 3 flags
+	DV3LN_2	;Device 3 LBA length
+	DV3LN_1	; "
+	DV3LN_0	; "
+	DV3ST_3	;Device 3 start LBA
+	DV3ST_2	; "
+	DV3ST_1	; "
+	DV3ST_0	; "
+	
+	endc
+
+	cblock	0x68	;Top of data buffer (receive shorthand)
 	
 	RC_SYNC	;Sync byte
 	RC_CMDG	;Command groups + 0x80
@@ -126,7 +167,7 @@ M_MBWR	equ	3	;Set when a multiblock write is in progress
 	
 	endc
 
-	cblock 0x20	;Bank 0 registers (transmit shorthand)
+	cblock 0x68	;Top of data buffer (transmit shorthand)
 	
 	TX_CMDN	;Command number
 	TX_BLKS	;Block count
@@ -351,12 +392,6 @@ Init
 	movlw	B'00110010'
 	movwf	TRISC
 
-	movlw	0x20		;Start pointers at top of linear memory
-	movwf	FSR0H
-	movwf	FSR1H
-	clrf	FSR0L
-	clrf	FSR1L
-
 	movlw	B'00001000'	;Interrupt on PORTA pin change enabled, but
 	movwf	INTCON		; interrupt subsystem off for now
 
@@ -373,12 +408,81 @@ DelayMs	DELAY	242		; has been done
 	movwf	SSPCON1		; "
 	movlb	0		; "
 
-	bsf	FLAGS,DEV1ON
-	bsf	FLAGS,DEV2ON
-	bsf	FLAGS,DEV3ON
+	movlw	0x51		;Set up a read command for the MMC card (R1-
+	movwf	M_CMDN		; type response)
+	bcf	M_FLAGS,M_CMDLR	; "
+	bcf	M_FLAGS,M_CMDRB	; "
+	clrf	M_ADR3		;Point the card address to the master boot
+	clrf	M_ADR2		; record
+	clrf	M_ADR1		; "
+	clrf	M_ADR0		; "
+	bcf	PORTC,RC3	;Assert !CS
+	call	MmcCmd		;Send the MMC command
+	btfsc	M_FLAGS,M_FAIL	;If the operation failed, give up and just pass
+	goto	NoDevices	; !ENBL through to the next device
+	movlw	0x20		;Point FSR0 to the top of the data buffer
+	movwf	FSR0H		; "
+	movlw	0x48		; "
+	movwf	FSR0L		; "
+	call	MmcReadData	;Read data from the MMC card
+	btfsc	M_FLAGS,M_FAIL	;If the operation failed, give up and just pass
+	goto	NoDevices	; !ENBL through to the next device
+	bsf	PORTC,RC3	;Deassert !CS
+	
+	clrf	DV0FLAG		;Clear all four devices' flags to start with
+	clrf	DV1FLAG		; "
+	clrf	DV2FLAG		; "
+	clrf	DV3FLAG		; "
+	movlw	0x22		;Point FSR0 to the MBR partition table
+	movwf	FSR0H		; "
+	movlw	0x06		; "
+	movwf	FSR0L		; "
+	movlw	0x20		;Point FSR1 to the device structs
+	movwf	FSR1H		; "
+	clrf	FSR1L		; "
+	movlw	4		;Loop through all four MBR partition entries
+	movwf	TEMP		; "
+MbrLoop	moviw	4[FSR0]		;Check whether the partition type is 0x20; if
+	xorlw	0x20		; it isn't, then move ahead to the next one
+	btfss	STATUS,Z	; "
+	bra	MbrNext		; "
+	moviw	15[FSR0]	;Check whether the partition size > 0xFFFFFF;
+	btfss	STATUS,Z	; if it is, it's too big, move ahead to the
+	bra	MbrNext		; next one
+	moviw	11[FSR0]	;Copy the partition start LBA, converting the
+	movwi	4[FSR1]		; little-endian number to big-endian as we go
+	moviw	10[FSR0]	; "
+	movwi	5[FSR1]		; "
+	moviw	9[FSR0]		; "
+	movwi	6[FSR1]		; "
+	moviw	8[FSR0]		; "
+	movwi	7[FSR1]		; "
+	moviw	14[FSR0]	;Copy the partition LBA size, converting the
+	movwi	1[FSR1]		; little-endian number to big-endian as we go
+	moviw	13[FSR0]	; "
+	movwi	2[FSR1]		; "
+	moviw	12[FSR0]	; "
+	movwi	3[FSR1]		; "
+	movlw	1 << DV_EXST	;Set the device-exists flag for this partition
+	movwi	0[FSR1]		; "
+	addfsr	FSR1,8		;Advance device struct pointer to next entry
+MbrNext	addfsr	FSR0,16		;Advance the MBR pointer to the next entry
+	decfsz	TEMP,F		;If we have partition entries left to scan,
+	bra	MbrLoop		; loop for the next one
+	moviw	0[FSR0]		;After all that, check whether the 0xAA55 (LE)
+	xorlw	0x55		; MBR signature is present; if it isn't, then
+	btfss	STATUS,Z	; all we did above was for nothing because this
+	goto	NoDevices	; isn't a valid MBR, so just pass !ENBL through
+	moviw	1[FSR0]		; "
+	xorlw	0xAA		; "
+	btfss	STATUS,Z	; "
+	goto	NoDevices	; "
+	btfss	DV0FLAG,DV_EXST	;If we didn't detect any valid partitions, just
+	goto	NoDevices	; pass !ENBL through; if we have at least one,
+	goto	WaitEnbl	; enter the normal idle loop and wait for !ENBL
 
-	goto	Dev0Jump
 
+Asserted
 
 ;;; Mainline Code ;;;
 
@@ -430,27 +534,14 @@ NakCommand
 	clrf	TX_PAD3		; "
 	movlw	0x81		;We know what the checksum will be, so just
 	movwf	TX_CSUM		; hardcode it
-	movlw	0x20		;Point FSR0 at the top of linear memory, where
-	movwf	FSR0H		; we want transmission to start from
-	clrf	FSR0L		; "
 	movlp	high Transmit	;Initiate transmission; if it's aborted, we
 	call	Transmit	; don't actually do anything differently
 	return			;Done
 
 CmdRead
 	call	MmcStopOngoing	;Stop any multiblock read or write
-	clrf	M_ADR0		;Shift the block address left by 9 (multiply it
-	lslf	RC_ADRL,W	; by 512) to transform it into the byte address
-	movwf	M_ADR1		; used by the MMC card
-	rlf	RC_ADRM,W	; "
-	movwf	M_ADR2		; "
-	rlf	RC_ADRH,W	; "
-	andlw	B'00000111'
-	movwf	M_ADR3		; "
-	btfsc	FLAGS,DEVSEL1
-	bsf	M_ADR3,4
-	btfsc	FLAGS,DEVSEL0
-	bsf	M_ADR3,3
+	call	TranslateAddr	;Translate block address to MMC block address
+	call	MmcConvAddr	;Convert the address if necessary
 	movf	RC_BLKS,W	;Move the block count from receiver position to
 	movwf	TX_BLKS		; transmitter position
 	movlw	0x80		;Command number is the read command with the
@@ -460,12 +551,7 @@ CmdRead
 	clrf	TX_PAD2		; "
 	clrf	TX_PAD3		; "
 	;TODO clear 20 tag bytes too?
-CmdRea0	movlw	0x02		;Increment the read address by 512 - we do this
-	addwf	M_ADR1,F	; on the first loop iteration because the first
-	movlw	0		; sector on the MMC card is the controller
-	addwfc	M_ADR2,F	; status block, conveniently
-	addwfc	M_ADR3,F	; "
-	movlw	0x51		;Set up a read command for the MMC card (R1-
+CmdRea0	movlw	0x51		;Set up a read command for the MMC card (R1-
 	movwf	M_CMDN		; type response)
 	bcf	M_FLAGS,M_CMDLR	; "
 	bcf	M_FLAGS,M_CMDRB	; "
@@ -476,16 +562,13 @@ CmdRea0	movlw	0x02		;Increment the read address by 512 - we do this
 	bsf	TX_STAT,7	; status returned by the drive to indicate so
 	movlw	0x20		;Point FSR0 past the six header bytes and the
 	movwf	FSR0H		; 20 'tag' bytes to where the real data starts
-	movlw	0x1A		; "
+	movlw	0x62		; "
 	movwf	FSR0L		; "
 	btfss	M_FLAGS,M_FAIL	;If the operation didn't fail, read data from
 	call	MmcReadData	; the MMC card
 	bsf	PORTC,RC3	;Deassert !CS
 	btfsc	M_FLAGS,M_FAIL	;If the operation failed, set the MSB of the
 	bsf	TX_STAT,7	; status returned by the drive to indicate so
-	movlw	0x20		;Point FSR0 at the top of linear memory, where
-	movwf	FSR0H		; we want transmission to start from
-	clrf	FSR0L		; "
 	movlw	77		;Set the group count to 77 (512 bytes of data,
 	btfsc	M_FLAGS,M_FAIL	; 20 'tag' bytes, 6 byte header, checksum byte)
 	movlw	1		; unless there was a failure, in which case set
@@ -495,29 +578,15 @@ CmdRea0	movlw	0x02		;Increment the read address by 512 - we do this
 	call	Transmit	; "
 	btfsc	FLAGS,ABORTED	;If the command was aborted, return to idle
 	return			; loop
+	call	MmcIncAddr	;Increment address for next read
 	decfsz	TX_BLKS,F	;Decrement the block count; if it hits zero,
 	bra	CmdRea0		; that's all the reading we were requested to
 	return			; do, so call it done
 
 CmdWrite
 	call	MmcStopOngoing	;Stop any multiblock read or write
-	clrf	M_ADR0		;Shift the block address left by 9 (multiply it
-	lslf	RC_ADRL,W	; by 512) to transform it into the byte address
-	movwf	M_ADR1		; used by the MMC card
-	rlf	RC_ADRM,W	; "
-	movwf	M_ADR2		; "
-	rlf	RC_ADRH,W	; "
-	andlw	B'00000111'
-	movwf	M_ADR3		; "
-	btfsc	FLAGS,DEVSEL1
-	bsf	M_ADR3,4
-	btfsc	FLAGS,DEVSEL0
-	bsf	M_ADR3,3
-	movlw	0x02		;Increment the read address by 512 - we do this
-	addwf	M_ADR1,F	; at the start of a write because the first
-	movlw	0		; sector on the MMC card is the controller
-	addwfc	M_ADR2,F	; status block
-	addwfc	M_ADR3,F	; "
+	call	TranslateAddr	;Translate block address to MMC block address
+	call	MmcConvAddr	;Convert the address if necessary
 	movlw	0x59		;Set up a write command for the MMC card (R1-
 	movwf	M_CMDN		; type reply)
 	bcf	M_FLAGS,M_CMDLR	; "
@@ -531,7 +600,7 @@ CmdWriteCont
 	bra	NakCommand	; being a multiblock write going on, NAK
 	movlw	0x20		;Point FSR0 past the sync, length, header, and
 	movwf	FSR0H		; tag bytes, and to the data we'll be writing
-	movlw	0x1D		; "
+	movlw	0x65		; "
 	movwf	FSR0L		; "
 	btfss	M_FLAGS,M_FAIL	;If the operation didn't fail, write data to
 	call	MmcWriteData	; the MMC card
@@ -548,9 +617,6 @@ CmdWriteCont
 	clrf	TX_PAD1		;Clear the padding bytes
 	clrf	TX_PAD2		; "
 	clrf	TX_PAD3		; "
-	movlw	0x20		;Point FSR0 at the top of linear memory, where
-	movwf	FSR0H		; we want transmission to start from
-	clrf	FSR0L		; "
 	movlw	1		;Success or failure, we're transmitting one
 	movwf	GROUPS		; group in response
 	call	CalcChecksum	;Calculate the checksum on our response
@@ -560,46 +626,89 @@ CmdWriteCont
 
 CmdStatus
 	call	MmcStopOngoing	;Stop any multiblock read or write
-	clrf	M_ADR0		;Set the address to read the first sector of
-	clrf	M_ADR1		; the MMC card
-	clrf	M_ADR2		; "
-	clrf	M_ADR3		; "
-	btfsc	FLAGS,DEVSEL1
-	bsf	M_ADR3,4
-	btfsc	FLAGS,DEVSEL0
-	bsf	M_ADR3,3
-	movlw	0x51		;Set up a read command for the MMC card (R1-
-	movwf	M_CMDN		; type reply)
-	bcf	M_FLAGS,M_CMDLR	; "
-	bcf	M_FLAGS,M_CMDRB	; "
+	call	ClearResponse	;Clear the buffer for our response
 	movlw	0x83		;Command number is the status command with the
 	movwf	TX_CMDN		; MSB set
-	clrf	TX_BLKS		;Block count is a pad byte in status command
-	clrf	TX_STAT		;A zero status means all is well
-	clrf	TX_PAD1		;Clear the padding bytes
-	clrf	TX_PAD2		; "
-	clrf	TX_PAD3		; "
-	bcf	PORTC,RC3	;Assert !CS
-	btfss	M_FLAGS,M_FAIL	;If there haven't been any previous failures,
-	call	MmcCmd		; send the MMC command
-	btfsc	M_FLAGS,M_FAIL	;If the operation failed, set the MSB of the
+	btfsc	M_FLAGS,M_FAIL	;If there's been an MMC fail, set MSB of the
 	bsf	TX_STAT,7	; status returned by the drive to indicate so
-	movlw	0x20		;Point FSR0 past the six header bytes to where
-	movwf	FSR0H		; the real data starts
-	movlw	0x06		; "
-	movwf	FSR0L		; "
-	btfss	M_FLAGS,M_FAIL	;If the operation didn't fail, read data from
-	call	MmcReadData	; the MMC card
-	bsf	PORTC,RC3	;Deassert !CS
-	btfsc	M_FLAGS,M_FAIL	;If the operation failed, set the MSB of the
-	bsf	TX_STAT,7	; status returned by the drive to indicate so
-	movlw	0x20		;Point FSR0 at the top of linear memory, where
-	movwf	FSR0H		; we want transmission to start from
+	movlw	0x20		;Point FSR0 at the appropriate struct for the
+	movwf	FSR0H		; selected device
 	clrf	FSR0L		; "
-	movlw	49		;Set the group count to 49 (336 bytes of data,
-	btfsc	M_FLAGS,M_FAIL	; 6 byte header, checksum byte) unless there
-	movlw	1		; was a failure, in which case set it to 1 to
-	movwf	GROUPS		; carry the bad status back to mac
+	btfsc	FLAGS,DEVSEL1	; "
+	addfsr	FSR0,16		; "
+	btfsc	FLAGS,DEVSEL0	; "
+	addfsr	FSR0,8		; "
+	movlw	0x20		;Point FSR1 past the six header bytes to where
+	movwf	FSR1H		; the real data starts
+	movlw	0x4E		; "
+	movwf	FSR1L		; "
+	movlw	0x01		;Device manufacturer is 0x0100, not sure if
+	movwi	2[FSR1]		; anybody cares
+	movlw	0xF6		;Device is mountable, readable, writeable,
+	movwi	4[FSR1]		; ejectable (?), icon_included, & disk_in_place
+	moviw	3[FSR0]		;Copy the LBA length of the partition into the
+	movwi	7[FSR1]		; block size of the drive
+	moviw	2[FSR0]		; "
+	movwi	6[FSR1]		; "
+	moviw	1[FSR0]		; "
+	movwi	5[FSR1]		; "
+	addfsr	FSR1,7		;Decrement the block size of the drive because
+	movlw	0xFF		; it appears that the block size of the drive
+	addwf	INDF1,F		; is actually the maximum block on the drive
+	addfsr	FSR1,-1		; TODO look into this further
+	addwfc	INDF1,F		; "
+	addfsr	FSR1,-1		; "
+	addwfc	INDF1,F		; "
+	addfsr	FSR1,7		;Fill the first part of the manufacturer info
+	moviw	0[FSR0]		; with the partition information for this
+	movwi	0[FSR1]		; device
+	moviw	1[FSR0]		; "
+	movwi	1[FSR1]		; "
+	moviw	2[FSR0]		; "
+	movwi	2[FSR1]		; "
+	moviw	3[FSR0]		; "
+	movwi	3[FSR1]		; "
+	moviw	4[FSR0]		; "
+	movwi	4[FSR1]		; "
+	moviw	5[FSR0]		; "
+	movwi	5[FSR1]		; "
+	moviw	6[FSR0]		; "
+	movwi	6[FSR1]		; "
+	moviw	7[FSR0]		; "
+	movwi	7[FSR1]		; "
+	addfsr	FSR1,30		;Point to the icon area
+	addfsr	FSR1,22		; "
+	movlw	high Icon | 0x80;Point FSR0 to the icon table
+	movwf	FSR0H		; "
+	movlw	low Icon	; "
+	movwf	FSR0L		; "
+	clrf	TEMP		;Copy 256 bytes
+CmdSta0	moviw	FSR0++		; "
+	movwi	FSR1++		; "
+	decfsz	TEMP,F		; "
+	bra	CmdSta0		; "
+	movlw	0x0A		;The credits
+	movwi	FSR1++		; "
+	movlw	'T'		; "
+	movwi	FSR1++		; "
+	movlw	'a'		; "
+	movwi	FSR1++		; "
+	movlw	's'		; "
+	movwi	FSR1++		; "
+	movlw	'h'		; "
+	movwi	FSR1++		; "
+	movlw	'T'		; "
+	movwi	FSR1++		; "
+	movlw	'w'		; "
+	movwi	FSR1++		; "
+	movlw	'e'		; "
+	movwi	FSR1++		; "
+	movlw	'n'		; "
+	movwi	FSR1++		; "
+	movlw	't'		; "
+	movwi	FSR1++		; "
+	movlw	'y'		; "
+	movwi	FSR1++		; "
 	call	CalcChecksum	;Calculate the checksum on our response
 	movlp	high Transmit	;Initiate transmission; if it's aborted, we
 	call	Transmit	; don't actually do anything differently
@@ -608,75 +717,76 @@ CmdStatus
 
 ;;; Subprograms ;;;
 
-;Calculate the checksum of the block about to be transmitted, pointed to by
-; FSR0 and containing GROUPS * 7 bytes.  Trashes TEMP, TEMP2, and FSR1.
+;Calculate the checksum of the block about to be transmitted, containing
+; GROUPS * 7 bytes.  Trashes TEMP, TEMP2, and FSR0.
 CalcChecksum
-	movf	FSR0H,W		;Copy FSR0 into FSR1
-	movwf	FSR1H		; "
-	movf	FSR0L,W		; "
-	movwf	FSR1L		; "
+	movlw	0x20		;Point FSR0 at the top of the data buffer
+	movwf	FSR0H		; "
+	movlw	0x48		; "
+	movwf	FSR0L		; "
 	movf	GROUPS,W	;Copy the group count into TEMP
 	movwf	TEMP		; "
 	clrf	TEMP2		;Zero the running sum (mod 256)
 	bra	CalcCh1		;Jump the first add so we sum one less than the
-CalcCh0	moviw	FSR1++		; total bytes in the block and can write the
+CalcCh0	moviw	FSR0++		; total bytes in the block and can write the
 	addwf	TEMP2,F		; checksum to the very last byte position
-CalcCh1	moviw	FSR1++		;Add the bytes in this group to the running sum
+CalcCh1	moviw	FSR0++		;Add the bytes in this group to the running sum
 	addwf	TEMP2,F		; "
-	moviw	FSR1++		; "
+	moviw	FSR0++		; "
 	addwf	TEMP2,F		; "
-	moviw	FSR1++		; "
+	moviw	FSR0++		; "
 	addwf	TEMP2,F		; "
-	moviw	FSR1++		; "
+	moviw	FSR0++		; "
 	addwf	TEMP2,F		; "
-	moviw	FSR1++		; "
+	moviw	FSR0++		; "
 	addwf	TEMP2,F		; "
-	moviw	FSR1++		; "
+	moviw	FSR0++		; "
 	addwf	TEMP2,F		; "
 	decfsz	TEMP,F		;Loop until we've summed the last group
 	bra	CalcCh0		; "
 	comf	TEMP2,W		;Two's complement the sum so the whole block
 	addlw	1		; adds up to zero and write it to the block's
-	movwi	FSR1++		; last byte
+	movwi	FSR0++		; last byte
 	return
 
 ;Calculate the checksum of the block just received, starting at the third byte
-; of linear memory and containing GROUPS * 7 bytes.  Trashes TEMP, TEMP2, and
-; FSR1.
+; of the data buffer and containing GROUPS * 7 bytes.  Trashes TEMP, TEMP2, and
+; FSR0.
 CheckChecksum
-	movlw	0x20		;Point FSR1 to the third byte of linear memory
-	movwf	FSR1H		; "
-	movlw	0x03		; "
-	movwf	FSR1L		; "
+	movlw	0x20		;Point FSR0 to the third byte of the data
+	movwf	FSR0H		; buffer
+	movlw	0x4B		; "
+	movwf	FSR0L		; "
 	movf	GROUPS,W	;Copy the group count into TEMP
 	movwf	TEMP		; "
 	clrf	TEMP2		;Zero the running sum (mod 256)
-CheckC0	moviw	FSR1++		;Add the next seven bytes to the running sum
+CheckC0	moviw	FSR0++		;Add the next seven bytes to the running sum
 	addwf	TEMP2,F		; "
-	moviw	FSR1++		; "
+	moviw	FSR0++		; "
 	addwf	TEMP2,F		; "
-	moviw	FSR1++		; "
+	moviw	FSR0++		; "
 	addwf	TEMP2,F		; "
-	moviw	FSR1++		; "
+	moviw	FSR0++		; "
 	addwf	TEMP2,F		; "
-	moviw	FSR1++		; "
+	moviw	FSR0++		; "
 	addwf	TEMP2,F		; "
-	moviw	FSR1++		; "
+	moviw	FSR0++		; "
 	addwf	TEMP2,F		; "
-	moviw	FSR1++		; "
+	moviw	FSR0++		; "
 	addwf	TEMP2,F		; "
 	decfsz	TEMP,F		;Loop until we've summed the last group
 	bra	CheckC0		; "
 	movf	TEMP2,F		;Set Z if block sum is 0 and checksum is good
 	return
 
-;Clear linear memory for the response to a command according to the expected
-; response length according to mac, pointing FSR0 to the beginning of it and
-; setting GROUPS to the number of groups to be sent.  Trashes TEMP.
+;Clear the data buffer for the response to a command according to the expected
+; response length according to mac, setting GROUPS to the number of groups to
+; be sent.  Trashes TEMP and FSR0.
 ClearResponse
-	movlw	0x20		;Point FSR0 to the top of linear memory
+	movlw	0x20		;Point FSR0 at the top of the data buffer
 	movwf	FSR0H		; "
-	clrf	FSR0L		; "
+	movlw	0x48		; "
+	movwf	FSR0L		; "
 	movf	RC_RSPG,W	;Snuff the top bit of the number of groups in
 	andlw	B'01111111'	; the expected response and copy this into
 	movwf	GROUPS		; the group count as well as a temporary
@@ -691,9 +801,52 @@ ClearR0	movwi	FSR0++		;Write seven zeroes to the buffer
 	movwi	FSR0++		; "
 	decfsz	TEMP,F		;Loop until we've zeroed the last group
 	bra	ClearR0		; "
-	movlw	0x20		;Point FSR0 to the top of linear memory again
-	movwf	FSR0H		; "
+	return
+
+;Translate the address from a command into an address on the MMC card.  Sets
+; RNFERR if (considering the block count) the command would address memory that
+; is beyond the boundary of the drive.
+TranslateAddr
+	bcf	FLAGS,RNFERR	;Assume no error to start with
+	movlw	0x20		;Point FSR0 at the appropriate struct for the
+	movwf	FSR0H		; selected device
 	clrf	FSR0L		; "
+	btfsc	FLAGS,DEVSEL1	; "
+	addfsr	FSR0,16		; "
+	btfsc	FLAGS,DEVSEL0	; "
+	addfsr	FSR0,8		; "
+	decf	RC_BLKS,W	;Add the block count (less one because it's
+	addwf	RC_ADRL,F	; one-relative) to the block address so we can
+	movlw	0		; do a full boundary check
+	addwfc	RC_ADRM,F	; "
+	addwfc	RC_ADRH,F	; "
+	moviw	3[FSR0]		;Compare the maximum block address that would
+	subwf	RC_ADRL,W	; be accessed by this command to the LBA length
+	moviw	2[FSR0]		; of the partition; if the maximum block
+	subwfb	RC_ADRM,W	; address is greater than or equal to the LBA
+	moviw	1[FSR0]		; length of the partition, this is an invalid
+	subwfb	RC_ADRH,W	; access and must be rejected; set the record-
+	btfsc	STATUS,C	; not-found flag
+	bsf	FLAGS,RNFERR	; "
+	decf	RC_BLKS,W	;Restore the block address as before
+	subwf	RC_ADRL,F	; "
+	movlw	0		; "
+	subwfb	RC_ADRM,F	; "
+	subwfb	RC_ADRH,F	; "
+	btfsc	FLAGS,RNFERR	;If we had a record-not-found error, we're done
+	return			; "
+	moviw	7[FSR0]		;Add the block address to the start address for
+	addwf	RC_ADRL,W	; the partition and store the result in the
+	movwf	M_ADR0		; MMC address registers
+	moviw	6[FSR0]		; "
+	addwfc	RC_ADRM,W	; "
+	movwf	M_ADR1		; "
+	moviw	5[FSR0]		; "
+	addwfc	RC_ADRH,W	; "
+	movwf	M_ADR2		; "
+	clrf	M_ADR3		; "
+	moviw	4[FSR0]		; "
+	addwfc	M_ADR3,F	; "
 	return
 
 
@@ -781,6 +934,46 @@ MmcIni2	movlw	0x50		;Send command 16 (expect R1-type response) to
 	bsf	M_FLAGS,M_FAIL	; operation
 	bsf	PORTC,RC3	;Deassert !CS
 	return			;Regardless, we're done here
+
+;Convert a block address to a byte address if byte addressing is in effect.
+; Sets M_FAIL if the block address is above 0x7FFFFF (and thus can't fit as a
+; byte address).
+MmcConvAddr
+	btfsc	M_FLAGS,M_BKADR	;If block addressing is in effect, the address
+	return			; does not need to be converted
+	movf	M_ADR3,F	;Make sure that the top 9 bits of the block
+	btfss	STATUS,Z	; address are clear; if they are not, set the
+	bsf	M_FLAGS,M_FAIL	; fail flag
+	btfsc	M_ADR2,7	; "
+	bsf	M_FLAGS,M_FAIL	; "
+	btfsc	M_FLAGS,M_FAIL	;If the fail flag is set (due to the preceding
+	return			; check or anything else), we're done
+	lslf	M_ADR0,F	;Multiply the block address by 2 and then by
+	rlf	M_ADR1,F	; 256
+	rlf	M_ADR2,W	; "
+	movwf	M_ADR3		; "
+	movf	M_ADR1,W	; "
+	movwf	M_ADR2		; "
+	movf	M_ADR0,W	; "
+	movwf	M_ADR1		; "
+	clrf	M_ADR0		; "
+	return
+
+;Increment the address by one block according to the block/byte addressing
+; mode.  No protection is provided against the address wrapping around.
+MmcIncAddr
+	movlw	0x01		;Add 1 to the address if we're in block mode,
+	btfss	M_FLAGS,M_BKADR	; add 512 to the address if we're in byte mode,
+	movlw	0		; in either case carrying the remainder through
+	addwf	M_ADR0,F	; "
+	movlw	0		; "
+	btfss	M_FLAGS,M_BKADR	; "
+	movlw	0x02		; "
+	addwfc	M_ADR1,F	; "
+	movlw	0		; "
+	addwfc	M_ADR2,F	; "
+	addwfc	M_ADR3,F	; "
+	return
 
 ;Read 512 bytes of data from MMC card into buffer pointed to by FSR0.  Sets
 ; M_FAIL on fail. Trashes TEMP and FSR0.
@@ -1052,7 +1245,16 @@ MmcWai0	movlw	0xFF		;Clock a byte out of the MMC card while keeping
 
 ;;; Idle Handler ;;;
 
-	org	0x7F0
+	org	0x7F2
+
+NoDevices
+	btfsc	PORTA,RA5	;Spin until our !ENBL goes low
+	bra	$-1		; "
+	bcf	PORTA,RA0	;Assert !ENBL for next device in chain
+	btfss	PORTA,RA5	;Spin until our !ENBL goes high
+	bra	$-1		; "
+	bsf	PORTA,RA0	;Deassert !ENBL for next device in chain
+	bra	NoDevices
 
 SelectNext
 	movlw	B'00110010'	;Tristate RD
@@ -1142,7 +1344,7 @@ Dev0NEn	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
 	nop			; and wait for it to be asserted again
 
 EnterDev1
-	btfss	FLAGS,DEV1ON	;If there is no device 1, select the next
+	btfss	DV1FLAG,DV_EXST	;If there is no device 1, select the next
 	goto	SelectNext	; device and wait for !ENBL to be deasserted
 	bcf	FLAGS,DEVSEL1	;Select device 1 in the flag bits
 	bsf	FLAGS,DEVSEL0	; "
@@ -1284,7 +1486,7 @@ Dev1NEn	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
 	nop			; and wait for it to be asserted again
 
 EnterDev2
-	btfss	FLAGS,DEV2ON	;If there is no device 2, select the next
+	btfss	DV2FLAG,DV_EXST	;If there is no device 2, select the next
 	goto	SelectNext	; device and wait for !ENBL to be deasserted
 	bsf	FLAGS,DEVSEL1	;Select device 2 in the flag bits
 	bcf	FLAGS,DEVSEL0	; "
@@ -1426,7 +1628,7 @@ Dev2NEn	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
 	nop			; and wait for it to be asserted again
 
 EnterDev3
-	btfss	FLAGS,DEV3ON	;If there is no device 3, select the next
+	btfss	DV3FLAG,DV_EXST	;If there is no device 3, select the next
 	goto	SelectNext	; device and wait for !ENBL to be deasserted
 	bsf	FLAGS,DEVSEL1	;Select device 3 in the flag bits
 	bsf	FLAGS,DEVSEL0	; "
@@ -1568,17 +1770,284 @@ Dev3NEn	goto	WaitEnbl	;!ENBL has been deasserted, so get off the bus
 	nop			; and wait for it to be asserted again
 
 
+;;; Icon ;;;
+
+	org	0xF00
+
+Icon
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x03
+	retlw	0xFE
+	retlw	0xE0
+	retlw	0x00
+	retlw	0x0E
+	retlw	0x07
+	retlw	0xB0
+	retlw	0x00
+	retlw	0x18
+	retlw	0x00
+	retlw	0x70
+	retlw	0x00
+	retlw	0x33
+	retlw	0x40
+	retlw	0xF0
+	retlw	0x00
+	retlw	0x2E
+	retlw	0xDB
+	retlw	0xE0
+	retlw	0x00
+	retlw	0x3C
+	retlw	0x9B
+	retlw	0xC0
+	retlw	0x00
+	retlw	0x1D
+	retlw	0x9B
+	retlw	0x00
+	retlw	0x00
+	retlw	0x09
+	retlw	0x9B
+	retlw	0x00
+	retlw	0x00
+	retlw	0x09
+	retlw	0x9B
+	retlw	0x00
+	retlw	0x00
+	retlw	0x08
+	retlw	0x9B
+	retlw	0x00
+	retlw	0x00
+	retlw	0x08
+	retlw	0xBB
+	retlw	0xE0
+	retlw	0x00
+	retlw	0x0C
+	retlw	0x7B
+	retlw	0xB0
+	retlw	0x7F
+	retlw	0xFC
+	retlw	0x3A
+	retlw	0x7E
+	retlw	0x80
+	retlw	0x06
+	retlw	0x00
+	retlw	0xF1
+	retlw	0x80
+	retlw	0x07
+	retlw	0x83
+	retlw	0xE1
+	retlw	0x80
+	retlw	0x03
+	retlw	0xFF
+	retlw	0xC1
+	retlw	0x80
+	retlw	0x00
+	retlw	0xFF
+	retlw	0x01
+	retlw	0x80
+	retlw	0x00
+	retlw	0x00
+	retlw	0x01
+	retlw	0x8C
+	retlw	0x00
+	retlw	0x00
+	retlw	0x01
+	retlw	0x80
+	retlw	0x00
+	retlw	0x00
+	retlw	0x01
+	retlw	0x80
+	retlw	0x00
+	retlw	0x00
+	retlw	0x01
+	retlw	0x7F
+	retlw	0xFF
+	retlw	0xFF
+	retlw	0xFE
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x00
+	retlw	0x03
+	retlw	0xFE
+	retlw	0xE0
+	retlw	0x00
+	retlw	0x0F
+	retlw	0xFF
+	retlw	0xF0
+	retlw	0x00
+	retlw	0x1F
+	retlw	0xFF
+	retlw	0xF0
+	retlw	0x00
+	retlw	0x3F
+	retlw	0xFF
+	retlw	0xF0
+	retlw	0x00
+	retlw	0x3F
+	retlw	0xFF
+	retlw	0xE0
+	retlw	0x00
+	retlw	0x3F
+	retlw	0xFF
+	retlw	0xC0
+	retlw	0x00
+	retlw	0x1F
+	retlw	0xFF
+	retlw	0x00
+	retlw	0x00
+	retlw	0x0F
+	retlw	0xFF
+	retlw	0x00
+	retlw	0x00
+	retlw	0x0F
+	retlw	0xFF
+	retlw	0x00
+	retlw	0x00
+	retlw	0x0F
+	retlw	0xFF
+	retlw	0x00
+	retlw	0x00
+	retlw	0x0F
+	retlw	0xFF
+	retlw	0xE0
+	retlw	0x00
+	retlw	0x0F
+	retlw	0xFF
+	retlw	0xF0
+	retlw	0x7F
+	retlw	0xFF
+	retlw	0xFF
+	retlw	0xFE
+	retlw	0xFF
+	retlw	0xFF
+	retlw	0xFF
+	retlw	0xFF
+	retlw	0xFF
+	retlw	0xFF
+	retlw	0xFF
+	retlw	0xFF
+	retlw	0xFF
+	retlw	0xFF
+	retlw	0xFF
+	retlw	0xFF
+	retlw	0xFF
+	retlw	0xFF
+	retlw	0xFF
+	retlw	0xFF
+	retlw	0xFF
+	retlw	0xFF
+	retlw	0xFF
+	retlw	0xFF
+	retlw	0xFF
+	retlw	0xFF
+	retlw	0xFF
+	retlw	0xFF
+	retlw	0xFF
+	retlw	0xFF
+	retlw	0xFF
+	retlw	0xFF
+	retlw	0xFF
+	retlw	0xFF
+	retlw	0xFF
+	retlw	0xFF
+	retlw	0x7F
+	retlw	0xFF
+	retlw	0xFF
+	retlw	0xFE
+
+
 ;;; Transmitter Code ;;;
 
 	org	0x1000
 
-;Transmits GROUPS 7-byte groups of non-encoded data starting at FSR0.  Sets
+;Transmits GROUPS 7-byte groups of non-encoded data from the data buffer.  Sets
 ; ABORTED if a phase change caused the command to be aborted, in which case
 ; caller should return to idle state as soon as possible.  Trashes FSR0, TEMP,
 ; TEMP2, and GROUPS.
 Transmit
 	movlp	high Transmit	;Point PCLATH to this page so gotos work
 	movlb	0		;Point BSR to 0 so we can access PORTA/PORTC
+	movlw	0x20		;Point FSR0 at the top of the data buffer
+	movwf	FSR0H		; "
+	movlw	0x48		; "
+	movwf	FSR0L		; "
 	bcf	FLAGS,ABORTED	;Clear aborted flag to start
 	decf	PORTA,W		;Check the current state
 	xorlw	B'00000100'	;If it's 2, then mac is ready for us to request
@@ -2879,13 +3348,13 @@ XDataLp	bcf	PORTC,RC4	; 0 Start 7-to-8-encoded group; MSB always set
 	btfsc	STATUS,C	;+3
 	bra	$+1		;+4
 	bsf	PORTC,RC4	;+5
-	movlw	7		;+6 Increment the pointer by 7 to transmit
-	addwf	FSR0L,F		;+7  the next group
-	movlw	0		;-8  "
-	addwfc	FSR0H,F		;-7  "
-	decf	PORTA,W		;-6 Check the current state
-	btfsc	STATUS,Z	;-5 If it's 0 (holdoff), then effect a suspend
-	bra	XSuspend	;-4  now that we're done transmitting a group
+	addfsr	FSR0,7		;+6 Increment pointer by 7 to transmit next grp
+	decf	PORTA,W		;+7 Check the current state
+	btfsc	STATUS,Z	;-8 If it's 0 (holdoff), then effect a suspend
+	bra	XSuspend	;-7  now that we're done transmitting a group
+	andlw	B'00111100'	;-6 If it is anything but 1 (communication),
+	btfss	STATUS,Z	;-5  abort and get us back to idle loop ASAP
+	goto	XAbort		;-4  "
 	decfsz	GROUPS,F	;-3 We finished a group, decrement group count;
 	goto	XDataLp		;-2(-1)  if there are more, loop again
 	;fall through
@@ -2936,7 +3405,7 @@ RecvAbort
 
 ;Receives data from the mac.  Sets ABORTED if a phase change caused the command
 ; to be aborted, in which case caller should return to idle state as soon as
-; possible.  Overwrites linear memory with received data in the following way:
+; possible.  Overwrites data buffer with received data in the following way:
 ; first byte is sync byte, second byte is 0x80 + number of groups in command
 ; according to mac, third byte is 0x80 + number of groups in anticipated
 ; response, followed by a string of GROUPS seven-byte decoded groups.  Trashes
@@ -2944,11 +3413,10 @@ RecvAbort
 Receive
 	movlb	0		;Point BSR to 0 so we can access PORTA/PORTC
 	bcf	FLAGS,ABORTED	;Clear aborted flag to start
-	movlw	0x20		;Reset both pointers to the top of linear
-	movwf	FSR0H		; memory
-	movwf	FSR1H		; "
-	clrf	FSR0L		; "
-	clrf	FSR1L		; "
+	movlw	0x20		;Point FSR0 at the top of the data buffer
+	movwf	FSR0H		; "
+	movlw	0x48		; "
+	movwf	FSR0L		; "
 	clrf	GROUPS		;Clear counter of total received groups
 Receiv0	decf	PORTA,W		;Check the current state
 	xorlw	B'00000100'	;If it's 2, then mac hasn't said it's ready to
@@ -3096,7 +3564,7 @@ RcSt0	btfss	PORTC,RC5	;Signal starts at zero, wait until transition
 	goto	RcTo0_0		;122 cycles, 7.47 bit times
 	btfss	PORTA,RA1	;123 cycles, 7.53 bit times
 	bcf	INDF0,7		;124 cycles, 7.59 bit times
-	moviw	FSR0++		;125 cycles, 7.65 bit times
+	addfsr	FSR0,1		;125 cycles, 7.65 bit times
 	goto	RcSt1		;126 cycles, 7.71 bit times
 
 RcTo1_6	movlw	B'01000000'	;003 cycles, 0.18 bit times
@@ -3204,7 +3672,7 @@ RcTo1_6	movlw	B'01000000'	;003 cycles, 0.18 bit times
 	goto	RcTo0_0		;106 cycles, 6.49 bit times
 	btfss	PORTA,RA1	;107 cycles, 6.55 bit times
 	bcf	INDF0,7		;108 cycles, 6.61 bit times
-	moviw	FSR0++		;109 cycles, 6.67 bit times
+	addfsr	FSR0,1		;109 cycles, 6.67 bit times
 	goto	RcSt1		;110 cycles, 6.73 bit times
 
 RcTo1_5	movlw	B'00100000'	;003 cycles, 0.18 bit times
@@ -3296,7 +3764,7 @@ RcTo1_5	movlw	B'00100000'	;003 cycles, 0.18 bit times
 	goto	RcTo0_0		;090 cycles, 5.51 bit times
 	btfss	PORTA,RA1	;091 cycles, 5.57 bit times
 	bcf	INDF0,7		;092 cycles, 5.63 bit times
-	moviw	FSR0++		;093 cycles, 5.69 bit times
+	addfsr	FSR0,1		;093 cycles, 5.69 bit times
 	goto	RcSt1		;094 cycles, 5.75 bit times
 
 RcTo1_4	movlw	B'00010000'	;003 cycles, 0.18 bit times
@@ -3372,7 +3840,7 @@ RcTo1_4	movlw	B'00010000'	;003 cycles, 0.18 bit times
 	goto	RcTo0_0		;074 cycles, 4.53 bit times
 	btfss	PORTA,RA1	;075 cycles, 4.59 bit times
 	bcf	INDF0,7		;076 cycles, 4.65 bit times
-	moviw	FSR0++		;077 cycles, 4.71 bit times
+	addfsr	FSR0,1		;077 cycles, 4.71 bit times
 	goto	RcSt1		;078 cycles, 4.77 bit times
 
 RcTo1_3	movlw	B'00001000'	;003 cycles, 0.18 bit times
@@ -3432,7 +3900,7 @@ RcTo1_3	movlw	B'00001000'	;003 cycles, 0.18 bit times
 	goto	RcTo0_0		;058 cycles, 3.55 bit times
 	btfss	PORTA,RA1	;059 cycles, 3.61 bit times
 	bcf	INDF0,7		;060 cycles, 3.67 bit times
-	moviw	FSR0++		;061 cycles, 3.73 bit times
+	addfsr	FSR0,1		;061 cycles, 3.73 bit times
 	goto	RcSt1		;062 cycles, 3.79 bit times
 
 RcTo1_2	movlw	B'00000100'	;003 cycles, 0.18 bit times
@@ -3474,7 +3942,7 @@ RcTo1_2	movlw	B'00000100'	;003 cycles, 0.18 bit times
 	goto	RcTo0_0		;040 cycles, 2.45 bit times
 	btfss	PORTA,RA1	;041 cycles, 2.51 bit times
 	bcf	INDF0,7		;042 cycles, 2.57 bit times
-	moviw	FSR0++		;043 cycles, 2.63 bit times
+	addfsr	FSR0,1		;043 cycles, 2.63 bit times
 	goto	RcSt1		;044 cycles, 2.69 bit times
 
 RcTo1_1	movlw	B'00000010'	;003 cycles, 0.18 bit times
@@ -3500,14 +3968,14 @@ RcTo1_1	movlw	B'00000010'	;003 cycles, 0.18 bit times
 	goto	RcTo0_0		;024 cycles, 1.47 bit times
 	btfss	PORTA,RA1	;025 cycles, 1.53 bit times
 	bcf	INDF0,7		;026 cycles, 1.59 bit times
-	moviw	FSR0++		;027 cycles, 1.65 bit times
+	addfsr	FSR0,1		;027 cycles, 1.65 bit times
 	goto	RcSt1		;028 cycles, 1.71 bit times
 
 RcTo1_0	movlw	B'00000001'	;003 cycles, 0.18 bit times
 	iorwf	INDF0,F		;004 cycles, 0.24 bit times
 	btfss	PORTA,RA1	;005 cycles, 0.31 bit times
 	bcf	INDF0,7		;006 cycles, 0.37 bit times
-	moviw	FSR0++		;007 cycles, 0.43 bit times
+	addfsr	FSR0,1		;007 cycles, 0.43 bit times
 	;fall through
 	
 RcSt1	btfsc	PORTC,RC5	;Signal starts at one, wait until transition
@@ -3633,7 +4101,7 @@ RcSt1	btfsc	PORTC,RC5	;Signal starts at one, wait until transition
 	goto	RcTo1_0		;122 cycles, 7.47 bit times
 	btfss	PORTA,RA1	;123 cycles, 7.53 bit times
 	bcf	INDF0,7		;124 cycles, 7.59 bit times
-	moviw	FSR0++		;125 cycles, 7.65 bit times
+	addfsr	FSR0,1		;125 cycles, 7.65 bit times
 	goto	RcSt0		;126 cycles, 7.71 bit times
 
 RcTo0_6	movlw	B'01000000'	;003 cycles, 0.18 bit times
@@ -3741,7 +4209,7 @@ RcTo0_6	movlw	B'01000000'	;003 cycles, 0.18 bit times
 	goto	RcTo1_0		;106 cycles, 6.49 bit times
 	btfss	PORTA,RA1	;107 cycles, 6.55 bit times
 	bcf	INDF0,7		;108 cycles, 6.61 bit times
-	moviw	FSR0++		;109 cycles, 6.67 bit times
+	addfsr	FSR0,1		;109 cycles, 6.67 bit times
 	goto	RcSt0		;110 cycles, 6.73 bit times
 
 RcTo0_5	movlw	B'00100000'	;003 cycles, 0.18 bit times
@@ -3833,7 +4301,7 @@ RcTo0_5	movlw	B'00100000'	;003 cycles, 0.18 bit times
 	goto	RcTo1_0		;090 cycles, 5.51 bit times
 	btfss	PORTA,RA1	;091 cycles, 5.57 bit times
 	bcf	INDF0,7		;092 cycles, 5.63 bit times
-	moviw	FSR0++		;093 cycles, 5.69 bit times
+	addfsr	FSR0,1		;093 cycles, 5.69 bit times
 	goto	RcSt0		;094 cycles, 5.75 bit times
 
 RcTo0_4	movlw	B'00010000'	;003 cycles, 0.18 bit times
@@ -3909,7 +4377,7 @@ RcTo0_4	movlw	B'00010000'	;003 cycles, 0.18 bit times
 	goto	RcTo1_0		;074 cycles, 4.53 bit times
 	btfss	PORTA,RA1	;075 cycles, 4.59 bit times
 	bcf	INDF0,7		;076 cycles, 4.65 bit times
-	moviw	FSR0++		;077 cycles, 4.71 bit times
+	addfsr	FSR0,1		;077 cycles, 4.71 bit times
 	goto	RcSt0		;078 cycles, 4.77 bit times
 
 RcTo0_3	movlw	B'00001000'	;003 cycles, 0.18 bit times
@@ -3969,7 +4437,7 @@ RcTo0_3	movlw	B'00001000'	;003 cycles, 0.18 bit times
 	goto	RcTo1_0		;058 cycles, 3.55 bit times
 	btfss	PORTA,RA1	;059 cycles, 3.61 bit times
 	bcf	INDF0,7		;060 cycles, 3.67 bit times
-	moviw	FSR0++		;061 cycles, 3.73 bit times
+	addfsr	FSR0,1		;061 cycles, 3.73 bit times
 	goto	RcSt0		;062 cycles, 3.79 bit times
 
 RcTo0_2	movlw	B'00000100'	;003 cycles, 0.18 bit times
@@ -4011,7 +4479,7 @@ RcTo0_2	movlw	B'00000100'	;003 cycles, 0.18 bit times
 	goto	RcTo1_0		;040 cycles, 2.45 bit times
 	btfss	PORTA,RA1	;041 cycles, 2.51 bit times
 	bcf	INDF0,7		;042 cycles, 2.57 bit times
-	moviw	FSR0++		;043 cycles, 2.63 bit times
+	addfsr	FSR0,1		;043 cycles, 2.63 bit times
 	goto	RcSt0		;044 cycles, 2.69 bit times
 
 RcTo0_1	movlw	B'00000010'	;003 cycles, 0.18 bit times
@@ -4037,14 +4505,14 @@ RcTo0_1	movlw	B'00000010'	;003 cycles, 0.18 bit times
 	goto	RcTo1_0		;024 cycles, 1.47 bit times
 	btfss	PORTA,RA1	;025 cycles, 1.53 bit times
 	bcf	INDF0,7		;026 cycles, 1.59 bit times
-	moviw	FSR0++		;027 cycles, 1.65 bit times
+	addfsr	FSR0,1		;027 cycles, 1.65 bit times
 	goto	RcSt0		;028 cycles, 1.71 bit times
 
 RcTo0_0	movlw	B'00000001'	;003 cycles, 0.18 bit times
 	iorwf	INDF0,F		;004 cycles, 0.24 bit times
 	btfss	PORTA,RA1	;005 cycles, 0.31 bit times
 	bcf	INDF0,7		;006 cycles, 0.37 bit times
-	moviw	FSR0++		;007 cycles, 0.43 bit times
+	addfsr	FSR0,1		;007 cycles, 0.43 bit times
 	goto	RcSt0		;008 cycles, 0.49 bit times
 
 
@@ -4058,7 +4526,7 @@ RecvDecode
 	movlw	0x20		;Start both pointers after the three initial
 	movwf	FSR0H		; IWM bytes (the sync byte, the length of the
 	movwf	FSR1H		; message in groups plus 0x80, the length of
-	movlw	0x03		; the expected reply in groups plus 0x80)
+	movlw	0x4B		; the expected reply in groups plus 0x80)
 	movwf	FSR0L		; "
 	movwf	FSR1L		; "
 
@@ -4071,43 +4539,43 @@ RDLoop	btfss	INDF0,7		;If the MSB of the next byte is clear, we went
 	lsrf	TEMP,F		;Rotate the LSB of the first byte of the group
 	rlf	INDF0,W		; into place
 	movwi	FSR1++		;Write the restored byte to memory
-	moviw	FSR0++		;Advance the input pointer
+	addfsr	FSR0,1		;Advance the input pointer
 	btfss	INDF0,7		;If the MSB of the next byte is clear, we went
 	bra	RDSus_5		; into suspend here, switch loops
 	lsrf	TEMP,F		;Rotate the LSB of the second byte of the group
 	rlf	INDF0,W		; into place
 	movwi	FSR1++		;Write the restored byte to memory
-	moviw	FSR0++		;Advance the input pointer
+	addfsr	FSR0,1		;Advance the input pointer
 	btfss	INDF0,7		;If the MSB of the next byte is clear, we went
 	bra	RDSus_4		; into suspend here, switch loops
 	lsrf	TEMP,F		;Rotate the LSB of the third byte of the group
 	rlf	INDF0,W		; into place
 	movwi	FSR1++		;Write the restored byte to memory
-	moviw	FSR0++		;Advance the input pointer
+	addfsr	FSR0,1		;Advance the input pointer
 	btfss	INDF0,7		;If the MSB of the next byte is clear, we went
 	bra	RDSus_3		; into suspend here, switch loops
 	lsrf	TEMP,F		;Rotate the LSB of the fourth byte of the group
 	rlf	INDF0,W		; into place
 	movwi	FSR1++		;Write the restored byte to memory
-	moviw	FSR0++		;Advance the input pointer
+	addfsr	FSR0,1		;Advance the input pointer
 	btfss	INDF0,7		;If the MSB of the next byte is clear, we went
 	bra	RDSus_2		; into suspend here, switch loops
 	lsrf	TEMP,F		;Rotate the LSB of the fifth byte of the group
 	rlf	INDF0,W		; into place
 	movwi	FSR1++		;Write the restored byte to memory
-	moviw	FSR0++		;Advance the input pointer
+	addfsr	FSR0,1		;Advance the input pointer
 	btfss	INDF0,7		;If the MSB of the next byte is clear, we went
 	bra	RDSus_1		; into suspend here, switch loops
 	lsrf	TEMP,F		;Rotate the LSB of the sixth byte of the group
 	rlf	INDF0,W		; into place
 	movwi	FSR1++		;Write the restored byte to memory
-	moviw	FSR0++		;Advance the input pointer
+	addfsr	FSR0,1		;Advance the input pointer
 	btfss	INDF0,7		;If the MSB of the next byte is clear, we went
 	bra	RDSus_0		; into suspend here, switch loops
 	lsrf	TEMP,F		;Rotate the LSB of the last byte of the group
 	rlf	INDF0,W		; into place
 	movwi	FSR1++		;Write the restored byte to memory
-	moviw	FSR0++		;Advance the input pointer
+	addfsr	FSR0,1		;Advance the input pointer
 	decfsz	TEMP2,F		;Decrement the group count and loop if it's not
 	bra	RDLoop		; yet zero
 	return
@@ -4117,31 +4585,31 @@ RDSus_7	moviw	FSR0++		;Pick up the byte with the LSBs of the next
 RDSus_6	lsrf	TEMP,F		;Rotate the LSB of the first byte of the group
 	rlf	INDF0,W		; into place
 	movwi	FSR1++		;Write the restored byte to memory
-	moviw	FSR0++		;Advance the input pointer
+	addfsr	FSR0,1		;Advance the input pointer
 RDSus_5	lsrf	TEMP,F		;Rotate the LSB of the second byte of the group
 	rlf	INDF0,W		; into place
 	movwi	FSR1++		;Write the restored byte to memory
-	moviw	FSR0++		;Advance the input pointer
+	addfsr	FSR0,1		;Advance the input pointer
 RDSus_4	lsrf	TEMP,F		;Rotate the LSB of the third byte of the group
 	rlf	INDF0,W		; into place
 	movwi	FSR1++		;Write the restored byte to memory
-	moviw	FSR0++		;Advance the input pointer
+	addfsr	FSR0,1		;Advance the input pointer
 RDSus_3	lsrf	TEMP,F		;Rotate the LSB of the fourth byte of the group
 	rlf	INDF0,W		; into place
 	movwi	FSR1++		;Write the restored byte to memory
-	moviw	FSR0++		;Advance the input pointer
+	addfsr	FSR0,1		;Advance the input pointer
 RDSus_2	lsrf	TEMP,F		;Rotate the LSB of the fifth byte of the group
 	rlf	INDF0,W		; into place
 	movwi	FSR1++		;Write the restored byte to memory
-	moviw	FSR0++		;Advance the input pointer
+	addfsr	FSR0,1		;Advance the input pointer
 RDSus_1	lsrf	TEMP,F		;Rotate the LSB of the sixth byte of the group
 	rlf	INDF0,W		; into place
 	movwi	FSR1++		;Write the restored byte to memory
-	moviw	FSR0++		;Advance the input pointer
+	addfsr	FSR0,1		;Advance the input pointer
 RDSus_0	lsrf	TEMP,F		;Rotate the LSB of the last byte of the group
 	rlf	INDF0,W		; into place
 	movwi	FSR1++		;Write the restored byte to memory
-	moviw	FSR0++		;Advance the input pointer
+	addfsr	FSR0,1		;Advance the input pointer
 	decf	TEMP2,F		;Decrement the group count
 	btfsc	STATUS,Z	;If the group count happens to be zero, mac
 	return			; suspended in the last group and we're done
