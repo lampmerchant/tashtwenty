@@ -4,7 +4,7 @@ An interface bridging the DCD protocol used by Apple's Hard Disk 20 to a MMC car
 
 # MMC Card Format
 
-The contents of the first 512-byte sector of the MMC card are reported as the Controller Status block.  In this way, the user can customize details such as the icon and size of the disk.  The first 512-byte sector on the disk is mapped to the second 512-byte sector of the MMC card, the second sector on the disk to the third on the card, and so forth.
+The MMC card must have an MBR (Master Boot Record) aka DOS-type partition table with up to four primary partitions of type 0xAF (HFS).  Partitions of other types will be ignored.  Extended partitions are not supported.
 
 # DCD (Directly Connected Disks) Protocol
 
