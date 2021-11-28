@@ -89,6 +89,7 @@ M_CMDRB	equ	5	;Set when an R1b is expected (busy signal after reply)
 M_MBRD	equ	4	;Set when a multiblock read is in progress
 M_MBWR	equ	3	;Set when a multiblock write is in progress
 M_BKADR	equ	2	;Set when block (rather than byte) addressing is in use
+M_CDVER	equ	1	;Set when dealing with a V2.0+ card, clear for 1.0
 
 ;DVxFLAG:
 DV_EXST	equ	7	;Set when device exists
@@ -97,7 +98,7 @@ DV_EXST	equ	7	;Set when device exists
 FWVER_3	equ	0x20
 FWVER_2	equ	0x21
 FWVER_1	equ	0x11
-FWVER_0	equ	0x26
+FWVER_0	equ	0x28
 
 
 ;;; Variable Storage ;;;
@@ -114,9 +115,9 @@ FWVER_0	equ	0x26
 	M_ADR2	;Second byte of the address, second byte of R3/R7 response
 	M_ADR1	;Third byte of the address, third byte of R3/R7 response
 	M_ADR0	;Fourth (low) byte of the address, last byte of R3/R7 response
-	M_CRC	;CRC byte of the command to be sent
 	TEMP	;Various purposes
 	TEMP2	;Various purposes
+	D3
 	D2
 	D1
 	D0
@@ -193,15 +194,17 @@ FWVER_0	equ	0x26
 	LOG_1E
 	LOG_1F
 	
-	;TODO Unused 8 bytes
-	UNUSED0
-	UNUSED1
-	UNUSED2
-	UNUSED3
-	UNUSED4
-	UNUSED5
+	;Card info
+	CARDINF
+
+	;TODO Unused 7 bytes
 	UNUSED6
-	UNUSED7
+	UNUSED5
+	UNUSED4
+	UNUSED3
+	UNUSED2
+	UNUSED1
+	UNUSED0
 	
 	endc
 
@@ -464,6 +467,8 @@ DelayMs	DELAY	242		; has been done
 	decfsz	TEMP,F		; "
 	bra	DelayMs		; "
 	call	MmcInit		;Initialize!
+	btfsc	M_FLAGS,M_FAIL	;If we couldn't initialize the card, give up
+	goto	NoDevices	; and pass !ENBL through to next device
 	movlb	4		;Now that we're initialized, crank the speed
 	movlw	B'00100001'	; of the SPI interface up to 2 MHz
 	movwf	SSPCON1		; "
@@ -665,7 +670,7 @@ CmdRead
 	clrf	TX_PAD2		; we convert the address since they overlap
 	clrf	TX_PAD3		; with the address bytes)
 	;TODO clear 20 tag bytes too?
-CmdRea0	movlw	0x51		;Set up a read command for the MMC card (R1-
+	movlw	0x52		;Set up a read command for the MMC card (R1-
 	movwf	M_CMDN		; type response)
 	bcf	M_FLAGS,M_CMDLR	; "
 	bcf	M_FLAGS,M_CMDRB	; "
@@ -673,14 +678,19 @@ CmdRea0	movlw	0x51		;Set up a read command for the MMC card (R1-
 	call	MmcCmd		;Send the MMC command
 	btfsc	M_FLAGS,M_FAIL	;If MMC operation failed, report the error
 	retlw	0x04		; "
-	movlw	0x20		;Point FSR0 past the six header bytes and the
+	bsf	M_FLAGS,M_MBRD	;Set the flag for an ongoing multiblock read
+CmdRea0	movlw	0x20		;Point FSR0 past the six header bytes and the
 	movwf	FSR0H		; 20 'tag' bytes to where the real data starts
 	movlw	0x62		; "
 	movwf	FSR0L		; "
 	call	MmcReadData	;Read data from the MMC card
 	btfsc	M_FLAGS,M_FAIL	;If MMC operation failed, report the error
 	retlw	0x05		; "
-	bsf	PORTC,RC3	;Deassert !CS
+	decf	TX_BLKS,W	;If the blocks-remaining counter is at one,
+	btfsc	STATUS,Z	; stop the multiblock read here before sending
+	call	MmcStopOngoing	; our response to the mac
+	btfsc	M_FLAGS,M_FAIL	;If MMC operation failed, report the error
+	retlw	0x06		; "
 	movlw	77		;Set the group count to 77 (512 bytes of data,
 	movwf	GROUPS		; 20 'tag' bytes, 6 byte header, checksum byte)
 	call	CalcChecksum	;Calculate the checksum on our response
@@ -706,13 +716,13 @@ CmdWrite
 	bra	CmdWriteCont	; "
 	call	MmcStopOngoing	;Stop any multiblock read or write
 	btfsc	M_FLAGS,M_FAIL	;If MMC operation failed, report the error
-	retlw	0x06		; "
+	retlw	0x07		; "
 	call	TranslateAddr	;Translate block address to MMC block address
 	btfsc	FLAGS,RNFERR	;If we couldn't translate this block address to
-	retlw	0x07		; an MMC address, report the error
+	retlw	0x08		; an MMC address, report the error
 	call	MmcConvAddr	;Convert the address if necessary
 	btfsc	M_FLAGS,M_FAIL	;If MMC operation failed, report the error
-	retlw	0x08		; "
+	retlw	0x09		; "
 	movlw	0x59		;Set up a write command for the MMC card (R1-
 	movwf	M_CMDN		; type reply)
 	bcf	M_FLAGS,M_CMDLR	; "
@@ -720,23 +730,23 @@ CmdWrite
 	bcf	PORTC,RC3	;Assert !CS
 	call	MmcCmd		;Send the MMC command
 	btfsc	M_FLAGS,M_FAIL	;If MMC operation failed, report the error
-	retlw	0x09		; "
+	retlw	0x0A		; "
 	bsf	M_FLAGS,M_MBWR	;Set the flag for an ongoing multiblock write
 CmdWriteCont
 	btfss	M_FLAGS,M_MBWR	;If for some reason we got here without there
-	retlw	0x0A		; being a multiblock write going on, error
+	retlw	0x0B		; being a multiblock write going on, error
 	movlw	0x20		;Point FSR0 past the sync, length, header, and
 	movwf	FSR0H		; tag bytes, and to the data we'll be writing
 	movlw	0x65		; "
 	movwf	FSR0L		; "
 	call	MmcWriteData	;Write data to the MMC card
 	btfsc	M_FLAGS,M_FAIL	;If MMC operation failed, report the error
-	retlw	0x0B		; "
+	retlw	0x0C		; "
 	decf	RC_BLKS,W	;If the blocks-remaining counter is at one,
 	btfsc	STATUS,Z	; stop the multiblock write here before sending
 	call	MmcStopOngoing	; our response to the mac
 	btfsc	M_FLAGS,M_FAIL	;If MMC operation failed, report the error
-	retlw	0x0C		; "
+	retlw	0x0D		; "
 	clrf	TX_PAD1		;Clear the padding bytes (don't do this before
 	clrf	TX_PAD2		; we convert the address since they overlap
 	clrf	TX_PAD3		; with the address bytes)
@@ -991,7 +1001,7 @@ TranslateAddr
 
 ;;; MMC Subprograms ;;;
 
-;Initialize MMC card.  Sets M_FAIL on fail.  Trashes TEMP.
+;Initialize MMC card.  Sets M_FAIL on fail.  Trashes TEMP and TEMP2.
 MmcInit
 	clrf	M_FLAGS		;Make sure flags are all clear to begin with
 	movlb	4		;This is where all the SSP registers are
@@ -1022,8 +1032,40 @@ MmcIni0	movlw	0xFF		; "
 	bsf	M_FLAGS,M_FAIL	; "
 	btfss	STATUS,Z	; "
 	return			; "
-MmcIni1	movlw	0x41		;Send command 1 (expect R1-type response),
-	movwf	M_CMDN		; which tells the card to initialize
+	bsf	M_FLAGS,M_CDVER	;Assume version 2.0+ to begin with
+	clrf	TEMP		;Set retry counter to 0 (65536) for later use
+	clrf	TEMP2		; "
+	movlw	0x48		;Send command 8 (expect R7-type response) to
+	movwf	M_CMDN		; check if we're dealing with a V2.0+ card
+	clrf	M_ADR3		; "
+	clrf	M_ADR2		; "
+	movlw	0x01		; "
+	movwf	M_ADR1		; "
+	movlw	0xAA		; "
+	movwf	M_ADR0		; "
+	bsf	M_FLAGS,M_CMDLR	; "
+	bcf	M_FLAGS,M_CMDRB	; "
+	call	MmcCmd		; "
+	movf	M_CMDN,W	;If the command set any error flags or there
+	andlw	B'11111110'	; was no response, switch assumptions and guess
+	btfsc	STATUS,Z	; that we're dealing with a Version 1 card and
+	btfsc	M_FLAGS,M_FAIL	; jump ahead to initialize it
+	bcf	M_FLAGS,M_CDVER	; "
+	btfss	M_FLAGS,M_CDVER	; "
+	bra	MmcIni1		; "
+	movf	M_ADR1,W	;If the command didn't error, but the lower 12
+	andlw	B'00001111'	; bits of the R7 response are something besides
+	xorlw	0x01		; 0x1AA, we're dealing with an unknown card, so
+	btfss	STATUS,Z	; raise the fail flag and return to caller
+	bsf	M_FLAGS,M_FAIL	; "
+	movf	M_ADR0,W	; "
+	xorlw	0xAA		; "
+	btfss	STATUS,Z	; "
+	bsf	M_FLAGS,M_FAIL	; "
+	btfsc	M_FLAGS,M_FAIL	; "
+	return			; "
+MmcIni1	movlw	0x77		;Send command 55 (expect R1-type response),
+	movwf	M_CMDN		; which is a prelude to an 'app' command
 	clrf	M_ADR3		; "
 	clrf	M_ADR2		; "
 	clrf	M_ADR1		; "
@@ -1031,17 +1073,57 @@ MmcIni1	movlw	0x41		;Send command 1 (expect R1-type response),
 	bcf	M_FLAGS,M_CMDLR	; "
 	bcf	M_FLAGS,M_CMDRB	; "
 	call	MmcCmd		; "
-	btfsc	M_FLAGS,M_FAIL	;If this command failed, unrecognized MMC card,
-	return			; fail the init operation
-	movf	M_CMDN,W	;If it returned an 0x00 status, initialization
-	btfsc	STATUS,Z	; is finished
-	bra	MmcIni2		; "
-	decf	M_CMDN,W	;If it returned an 0x01 status, initialization
-	btfsc	STATUS,Z	; is still proceeding, so try again
+	movf	M_CMDN,W	;If we got a status with any error bits set,
+	andlw	B'11111110'	; treat as a command failure
+	btfss	STATUS,Z	; "
+	bsf	M_FLAGS,M_FAIL	; "
+	btfsc	M_FLAGS,M_FAIL	;If this command fails, this is an unknown card
+	return			; so return the failure to caller
+	movlw	0x69		;Send app command 41 (expect R1-type response)
+	movwf	M_CMDN		; to initialize the card, setting the HCS
+	clrf	M_ADR3		; (high-capacity support) bit if we're dealing
+	btfsc	M_FLAGS,M_CDVER	; with a V2.0+ card to let the card know that
+	bsf	M_ADR3,6	; we support cards bigger than 4 GB (up to 2 
+	clrf	M_ADR2		; TB)
+	clrf	M_ADR1		; "
+	clrf	M_ADR0		; "
+	bcf	M_FLAGS,M_CMDLR	; "
+	bcf	M_FLAGS,M_CMDRB	; "
+	call	MmcCmd		; "
+	movf	M_CMDN,W	;If we got a status with any error bits set,
+	andlw	B'11111110'	; treat as a command failure
+	btfss	STATUS,Z	; "
+	bsf	M_FLAGS,M_FAIL	; "
+	btfsc	M_FLAGS,M_FAIL	;If this command fails, this is an unknown card
+	return			; so return the failure to caller
+	btfss	M_CMDN,0	;If it returned an 0x00 status, initialization
+	bra	MmcIni2		; is finished
+	DELAY	40		;If it returned an 0x01 status, delay for 120
+	decfsz	TEMP,F		; cycles (15 us), decrement the retry counter,
+	bra	MmcIni1		; and try again
+	decfsz	TEMP2,F		; "
 	bra	MmcIni1		; "
-	bsf	M_FLAGS,M_FAIL	;If it returned anything else, something is
-	return			; awry, fail the init operation
-MmcIni2	movlw	0x50		;Send command 16 (expect R1-type response) to
+	bsf	M_FLAGS,M_FAIL	;If we've gone 65536 attempts and the card is
+	return			; still not ready, report failure to caller
+MmcIni2	movlw	0x7A		;Send command 58 (expect R3-type response) to
+	movwf	M_CMDN		; read the operating condition register (OCR)
+	clrf	M_ADR3		; "
+	clrf	M_ADR2		; "
+	clrf	M_ADR1		; "
+	clrf	M_ADR0		; "
+	bsf	M_FLAGS,M_CMDLR	; "
+	bcf	M_FLAGS,M_CMDRB	; "
+	call	MmcCmd		; "
+	movf	M_CMDN,W	;If we got a status with any error bits set,
+	btfss	STATUS,Z	; treat as a command failure
+	bsf	M_FLAGS,M_FAIL	; "
+	btfsc	M_FLAGS,M_FAIL	;If this command fails, something is wrong, so
+	return			; return the failure to caller
+	bsf	M_FLAGS,M_BKADR	;If the card capacity status (CCS) bit of the
+	btfsc	M_ADR3,6	; OCR is set, we're using block addressing, so
+	bra	MmcIni4		; skip ahead
+MmcIni3	bcf	M_FLAGS,M_BKADR	;We're dealing with byte, not block addressing
+	movlw	0x50		;Send command 16 (expect R1-type response) to
 	movwf	M_CMDN		; tell the card we want to deal in 512-byte
 	clrf	M_ADR3		; sectors
 	clrf	M_ADR2		; "
@@ -1051,12 +1133,12 @@ MmcIni2	movlw	0x50		;Send command 16 (expect R1-type response) to
 	bcf	M_FLAGS,M_CMDLR	; "
 	bcf	M_FLAGS,M_CMDRB	; "
 	call	MmcCmd		; "
-	btfsc	M_FLAGS,M_FAIL	;If this command failed, something is wrong,
-	return			; fail the init operation
 	movf	M_CMDN,W	;If this command returned any response other
 	btfss	STATUS,Z	; than 0x00, something is wrong, fail the init
 	bsf	M_FLAGS,M_FAIL	; operation
-	movlw	0x7B		;Send command 59 (expect R1-type response) to
+	btfsc	M_FLAGS,M_FAIL	;If this command failed, something is wrong,
+	return			; fail the init operation
+MmcIni4	movlw	0x7B		;Send command 59 (expect R1-type response) to
 	movwf	M_CMDN		; tell the card we want to make life hard on
 	clrf	M_ADR3		; ourselves and have our CRCs checked by the
 	clrf	M_ADR2		; card
@@ -1066,13 +1148,16 @@ MmcIni2	movlw	0x50		;Send command 16 (expect R1-type response) to
 	bcf	M_FLAGS,M_CMDLR	; "
 	bcf	M_FLAGS,M_CMDRB	; "
 	call	MmcCmd		; "
-	btfsc	M_FLAGS,M_FAIL	;If this command failed, something is wrong,
-	return			; fail the init operation
 	movf	M_CMDN,W	;If this command returned any response other
 	btfss	STATUS,Z	; than 0x00, something is wrong, fail the init
 	bsf	M_FLAGS,M_FAIL	; operation
+	btfsc	M_FLAGS,M_FAIL	;If this command failed, something is wrong,
+	return			; fail the init operation
 	bsf	PORTC,RC3	;Deassert !CS
-	return			;Regardless, we're done here
+	movf	M_FLAGS,W	;Set up the card info byte of the status block
+	andlw	B'00000111'	; "
+	movwf	CARDINF		; "
+	return			;Congratulations, card is initialized!
 
 ;Convert a block address to a byte address if byte addressing is in effect.
 ; Sets M_FAIL if the block address is above 0x7FFFFF (and thus can't fit as a
@@ -1211,7 +1296,11 @@ MmcRea4	btfss	SSP1STAT,BF	;Wait until the next byte is received
 	btfss	STATUS,Z	; "
 	bsf	M_FLAGS,M_FAIL	; "
 	movlb	0		;Return to the default bank
-	return
+	btfss	M_FLAGS,M_FAIL	;If the CRC check didn't fail, return now
+	return			; "
+	call	MmcStopOngoing	;If the CRC check did fail, stop any ongoing
+	bsf	M_FLAGS,M_FAIL	; read (since the card doesn't know anything's
+	return			; wrong) and then return failure
 
 ;Write 512 bytes of data to MMC card from buffer pointed to by FSR0.  Sets
 ; M_FAIL on fail. Trashes TEMP, TEMP2, and FSR0.
@@ -1325,51 +1414,51 @@ MmcSto0	movlb	4		;Switch to the bank with the SSP registers
 ; Trashes TEMP.
 MmcCmd
 	bcf	M_FLAGS,M_FAIL	;Assume no failure to start with
-	clrf	M_CRC		;Start the CRC7 register out at 0
+	clrf	TEMP		;Start the CRC7 register out at 0
 	movlp	high LutCrc7	;Point PCLATH to the CRC7 lookup table
 	movlb	4		;Switch to the bank with the SSP registers
 	movf	M_CMDN,W	;Clock out all six MMC buffer bytes as command,
 	movwf	SSP1BUF		; calculating the CRC7 along the way
-	xorwf	M_CRC,W		; "
+	xorwf	TEMP,W		; "
 	callw			; "
-	movwf	M_CRC		; "
+	movwf	TEMP		; "
 	btfss	SSP1STAT,BF	; "
 	bra	$-1		; "
 	movf	M_ADR3,W	; "
 	movwf	SSP1BUF		; "
-	xorwf	M_CRC,W		; "
+	xorwf	TEMP,W		; "
 	callw			; "
-	movwf	M_CRC		; "
+	movwf	TEMP		; "
 	btfss	SSP1STAT,BF	; "
 	bra	$-1		; "
 	movf	M_ADR2,W	; "
 	movwf	SSP1BUF		; "
-	xorwf	M_CRC,W		; "
+	xorwf	TEMP,W		; "
 	callw			; "
-	movwf	M_CRC		; "
+	movwf	TEMP		; "
 	btfss	SSP1STAT,BF	; "
 	bra	$-1		; "
 	movf	M_ADR1,W	; "
 	movwf	SSP1BUF		; "
-	xorwf	M_CRC,W		; "
+	xorwf	TEMP,W		; "
 	callw			; "
-	movwf	M_CRC		; "
+	movwf	TEMP		; "
 	btfss	SSP1STAT,BF	; "
 	bra	$-1		; "
 	movf	M_ADR0,W	; "
 	movwf	SSP1BUF		; "
-	xorwf	M_CRC,W		; "
+	xorwf	TEMP,W		; "
 	callw			; "
 	movlp	0		; "
-	movwf	M_CRC		; "
-	bsf	M_CRC,0		; "
+	movwf	TEMP		; "
+	bsf	TEMP,0		; "
 	btfss	SSP1STAT,BF	; "
 	bra	$-1		; "
-	movf	M_CRC,W		; "
+	movf	TEMP,W		; "
 	movwf	SSP1BUF		; "
 	btfss	SSP1STAT,BF	; "
 	bra	$-1		; "
-	;TODO for CMD12, it is necessary to clock and throw away a stuff byte
+	;TODO for CMD12, it is necessary to clock and throw away a stuff byte?
 	movlw	8		;Try to get status as many as eight times
 	movwf	TEMP		; "
 MmcCmd1	movlw	0xFF		;Clock a byte out of the MMC card while keeping
