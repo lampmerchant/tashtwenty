@@ -1,14 +1,39 @@
-# tashtwenty
+# TashTwenty
 
-An interface bridging the DCD protocol used by Apple's Hard Disk 20 to a MMC card, implemented using a PIC16F1825.
+## Elevator Pitch
 
-# MMC Card Format
+It's a DCD (the interface used by the Hard Disk 20 to plug in through the disk port) interface, contained entirely within a PIC16F1825
+(14 pins, ~$1.70) microcontroller. It bit-bangs the low-level IWM protocol using the read/write and phase lines on the "DB"-19 disk
+port, no programmable logic devices of any kind required.
+
+It interfaces to an MMC card and can emulate up to four DCD devices.  It also has an enable output which can be used to
+chain more DCD devices (though Mac OS only supports a total of four) and a floppy disk drive.
+
+(Despite the name, there is nothing limiting it to 20 megabytes.)
+
+
+## Project Status
+
+Functional, though not rigorously tested.
+
+
+## Caveats
+
+Due to the dearth of documentation on the DCD protocol (see below), the protocol only implements the commands whose formats are known,
+namely read, write, and device identification.  Responses to other commands are faked.  Fortunately, this seems to be enough for the
+device to function properly, including formatting.
+
+
+## Technical Details
+
+### MMC Card Format
 
 The MMC card must have an MBR (Master Boot Record) aka DOS-type partition table with up to four primary partitions of type 0xAF (HFS).  Partitions of other types will be ignored.  Extended partitions are not supported.
 
-# DCD (Directly Connected Disks) Protocol
 
-## Details Missing or Inaccurate in the [May 1985 DCD Document](http://bitsavers.trailing-edge.com/pdf/apple/disk/hd20/Directly_Connected_Disks_Specification_1.2a_May85.pdf)
+### DCD (Directly Connected Disks) Protocol
+
+#### Details Missing or Inaccurate in the [May 1985 DCD Document](http://bitsavers.trailing-edge.com/pdf/apple/disk/hd20/Directly_Connected_Disks_Specification_1.2a_May85.pdf)
 
 * The sync byte, in either direction, is always 0xAA, 0x96 is not used.
 * When Mac is transmitting a command, the sync byte is followed by two more raw IWM bytes before the 7-to-8 groups begin. DCD transmits only a sync byte and does not transmit these extra bytes.
@@ -30,13 +55,15 @@ The MMC card must have an MBR (Master Boot Record) aka DOS-type partition table 
    * The Filler field is replaced by a 16-byte Pascal string (first byte is length) that determines what appears in the "Where:" field of the Get Info dialog box.
 * The checksum byte is chosen such that all data bytes in all 7-to-8 groups (not including the sync byte or the command/response length IWM bytes) sum to 0 modulo 256.
 
-## Details Out of Scope for DCD Documentation But Useful to Know
+
+#### Details Out of Scope for DCD Documentation But Useful to Know
 
 * The IWM transmits and receives MSB first and the MSB is always set; the chip uses this for timing.
 * The IWM transmits at its "fast" speed, 47/96 MHz, or approximately 489.58 Kbps, data cell width 2.043 us.
 * The IWM's output (on WR pin) is in NRZI format (inversion == 1, no inversion == 0).
 * The IWM's input (on RD pin) detects only falling edges.
 
-## Beyond
+
+#### Beyond
 
 Other details about the protocol at the signal level and the read, write, and controller status commands are accurately reported by the [May 1985 document](http://bitsavers.trailing-edge.com/pdf/apple/disk/hd20/Directly_Connected_Disks_Specification_1.2a_May85.pdf); other commands are unknown to me, but hopefully this information will be useful to anyone in the future who wishes to implement DCD.
