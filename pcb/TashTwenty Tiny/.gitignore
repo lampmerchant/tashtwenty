@@ -1,0 +1,14 @@
+# tmp zip files
+*.zip
+
+# KiCad backup files
+*bak
+
+# KiCad cache files
+*-cache
+
+# Gerber files
+*.drl
+*.gbr
+*.ps
+
