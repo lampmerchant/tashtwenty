@@ -1,0 +1,278 @@
+EESchema Schematic File Version 4
+EELAYER 30 0
+EELAYER END
+$Descr A4 11693 8268
+encoding utf-8
+Sheet 3 3
+Title ""
+Date ""
+Rev ""
+Comp ""
+Comment1 ""
+Comment2 ""
+Comment3 ""
+Comment4 ""
+$EndDescr
+$Comp
+L power:+12V #PWR0103
+U 1 1 61A7DDE6
+P 1500 1500
+F 0 "#PWR0103" H 1500 1350 50  0001 C CNN
+F 1 "+12V" H 1515 1673 50  0000 C CNN
+F 2 "" H 1500 1500 50  0001 C CNN
+F 3 "" H 1500 1500 50  0001 C CNN
+	1    1500 1500
+	1    0    0    -1  
+$EndComp
+$Comp
+L Device:LED D1
+U 1 1 61A7E10E
+P 1500 2250
+F 0 "D1" V 1539 2132 50  0000 R CNN
+F 1 "LED" V 1448 2132 50  0000 R CNN
+F 2 "LED_THT:LED_D5.0mm_Horizontal_O3.81mm_Z3.0mm" H 1500 2250 50  0001 C CNN
+F 3 "~" H 1500 2250 50  0001 C CNN
+	1    1500 2250
+	0    -1   -1   0   
+$EndComp
+$Comp
+L power:GND #PWR0119
+U 1 1 61A7EA4F
+P 1500 2500
+F 0 "#PWR0119" H 1500 2250 50  0001 C CNN
+F 1 "GND" H 1505 2327 50  0000 C CNN
+F 2 "" H 1500 2500 50  0001 C CNN
+F 3 "" H 1500 2500 50  0001 C CNN
+	1    1500 2500
+	1    0    0    -1  
+$EndComp
+$Comp
+L Device:R R8
+U 1 1 61A7F7FD
+P 1500 1800
+F 0 "R8" H 1570 1846 50  0000 L CNN
+F 1 "1200" H 1570 1755 50  0000 L CNN
+F 2 "Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P7.62mm_Horizontal" V 1430 1800 50  0001 C CNN
+F 3 "~" H 1500 1800 50  0001 C CNN
+	1    1500 1800
+	1    0    0    -1  
+$EndComp
+Wire Wire Line
+	1500 2100 1500 1950
+Wire Wire Line
+	1500 1650 1500 1500
+Wire Wire Line
+	1500 2500 1500 2400
+$Comp
+L 74xx:74LS08 U2
+U 2 1 61A7FDAB
+P 6400 1500
+F 0 "U2" H 6400 1825 50  0000 C CNN
+F 1 "74ACT08" H 6400 1734 50  0000 C CNN
+F 2 "Package_DIP:DIP-14_W7.62mm" H 6400 1500 50  0001 C CNN
+F 3 "http://www.ti.com/lit/gpn/sn74LS08" H 6400 1500 50  0001 C CNN
+	2    6400 1500
+	1    0    0    -1  
+$EndComp
+$Comp
+L 74xx:74LS08 U2
+U 3 1 61A839C6
+P 6400 2500
+F 0 "U2" H 6400 2825 50  0000 C CNN
+F 1 "74ACT08" H 6400 2734 50  0000 C CNN
+F 2 "Package_DIP:DIP-14_W7.62mm" H 6400 2500 50  0001 C CNN
+F 3 "http://www.ti.com/lit/gpn/sn74LS08" H 6400 2500 50  0001 C CNN
+	3    6400 2500
+	1    0    0    -1  
+$EndComp
+$Comp
+L Device:LED_Dual_ACA D2
+U 1 1 61A8E744
+P 7650 2000
+F 0 "D2" H 7650 1653 50  0000 C CNN
+F 1 "LED_Dual_ACA" H 7650 1744 50  0000 C CNN
+F 2 "LED_THT:LED_D5.0mm-3_Horizontal_O3.81mm_Z3.0mm" H 7650 2000 50  0001 C CNN
+F 3 "~" H 7650 2000 50  0001 C CNN
+	1    7650 2000
+	-1   0    0    1   
+$EndComp
+$Comp
+L Device:R R11
+U 1 1 61A90834
+P 7000 2500
+F 0 "R11" V 6793 2500 50  0000 C CNN
+F 1 "330" V 6884 2500 50  0000 C CNN
+F 2 "Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P7.62mm_Horizontal" V 6930 2500 50  0001 C CNN
+F 3 "~" H 7000 2500 50  0001 C CNN
+	1    7000 2500
+	0    1    1    0   
+$EndComp
+$Comp
+L Device:R R10
+U 1 1 61A90C1F
+P 7000 1500
+F 0 "R10" V 6793 1500 50  0000 C CNN
+F 1 "330" V 6884 1500 50  0000 C CNN
+F 2 "Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P7.62mm_Horizontal" V 6930 1500 50  0001 C CNN
+F 3 "~" H 7000 1500 50  0001 C CNN
+	1    7000 1500
+	0    1    1    0   
+$EndComp
+Wire Wire Line
+	6700 1500 6850 1500
+Wire Wire Line
+	6700 2500 6850 2500
+Wire Wire Line
+	7350 1900 7250 1900
+Wire Wire Line
+	7250 1900 7250 1500
+Wire Wire Line
+	7250 1500 7150 1500
+Wire Wire Line
+	7150 2500 7250 2500
+Wire Wire Line
+	7250 2500 7250 2100
+Wire Wire Line
+	7250 2100 7350 2100
+Wire Wire Line
+	8100 2000 7950 2000
+Text GLabel 4300 1800 0    50   Input ~ 0
+RD
+Text GLabel 6000 2600 0    50   Input ~ 0
+WR
+Wire Wire Line
+	6000 2600 6100 2600
+$Comp
+L 74xx:74LS08 U2
+U 1 1 61A935ED
+P 6400 3500
+F 0 "U2" H 6400 3825 50  0000 C CNN
+F 1 "74ACT08" H 6400 3734 50  0000 C CNN
+F 2 "Package_DIP:DIP-14_W7.62mm" H 6400 3500 50  0001 C CNN
+F 3 "http://www.ti.com/lit/gpn/sn74LS08" H 6400 3500 50  0001 C CNN
+	1    6400 3500
+	1    0    0    -1  
+$EndComp
+Text GLabel 6000 3600 0    50   Input ~ 0
+~ENABLE
+Wire Wire Line
+	6000 3600 6100 3600
+Wire Wire Line
+	4300 1800 4450 1800
+Wire Wire Line
+	5750 2300 5750 2400
+Wire Wire Line
+	5750 1900 5750 2000
+$Comp
+L power:+5V #PWR0121
+U 1 1 61A97370
+P 5750 1900
+F 0 "#PWR0121" H 5750 1750 50  0001 C CNN
+F 1 "+5V" H 5765 2073 50  0000 C CNN
+F 2 "" H 5750 1900 50  0001 C CNN
+F 3 "" H 5750 1900 50  0001 C CNN
+	1    5750 1900
+	1    0    0    -1  
+$EndComp
+$Comp
+L Device:R R9
+U 1 1 61A96CB0
+P 5750 2150
+F 0 "R9" H 5820 2196 50  0000 L CNN
+F 1 "10k" H 5820 2105 50  0000 L CNN
+F 2 "Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P7.62mm_Horizontal" V 5680 2150 50  0001 C CNN
+F 3 "~" H 5750 2150 50  0001 C CNN
+	1    5750 2150
+	1    0    0    -1  
+$EndComp
+$Comp
+L power:+5V #PWR0124
+U 1 1 61AB25B5
+P 5250 900
+F 0 "#PWR0124" H 5250 750 50  0001 C CNN
+F 1 "+5V" H 5265 1073 50  0000 C CNN
+F 2 "" H 5250 900 50  0001 C CNN
+F 3 "" H 5250 900 50  0001 C CNN
+	1    5250 900 
+	1    0    0    -1  
+$EndComp
+$Comp
+L Device:R R13
+U 1 1 61AB25BF
+P 5250 1250
+F 0 "R13" H 5320 1296 50  0000 L CNN
+F 1 "10k" H 5320 1205 50  0000 L CNN
+F 2 "Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P7.62mm_Horizontal" V 5180 1250 50  0001 C CNN
+F 3 "~" H 5250 1250 50  0001 C CNN
+	1    5250 1250
+	1    0    0    -1  
+$EndComp
+$Comp
+L Transistor_BJT:BC337 Q1
+U 1 1 61AB9694
+P 5150 1800
+F 0 "Q1" H 5341 1846 50  0000 L CNN
+F 1 "BC337" H 5341 1755 50  0000 L CNN
+F 2 "Package_TO_SOT_THT:TO-92_Inline" H 5350 1725 50  0001 L CIN
+F 3 "https://diotec.com/tl_files/diotec/files/pdf/datasheets/bc337.pdf" H 5150 1800 50  0001 L CNN
+	1    5150 1800
+	1    0    0    -1  
+$EndComp
+$Comp
+L Device:R R12
+U 1 1 61ABBEBE
+P 4600 1800
+F 0 "R12" V 4393 1800 50  0000 C CNN
+F 1 "10k" V 4484 1800 50  0000 C CNN
+F 2 "Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P7.62mm_Horizontal" V 4530 1800 50  0001 C CNN
+F 3 "~" H 4600 1800 50  0001 C CNN
+	1    4600 1800
+	0    1    1    0   
+$EndComp
+Wire Wire Line
+	4750 1800 4950 1800
+$Comp
+L power:GND #PWR0125
+U 1 1 61ABD1D4
+P 5250 2100
+F 0 "#PWR0125" H 5250 1850 50  0001 C CNN
+F 1 "GND" H 5255 1927 50  0000 C CNN
+F 2 "" H 5250 2100 50  0001 C CNN
+F 3 "" H 5250 2100 50  0001 C CNN
+	1    5250 2100
+	1    0    0    -1  
+$EndComp
+Wire Wire Line
+	5250 2100 5250 2000
+Wire Wire Line
+	5250 1600 5250 1500
+Connection ~ 5250 1500
+Wire Wire Line
+	5250 900  5250 1100
+Wire Wire Line
+	5250 1500 5750 1500
+Wire Wire Line
+	5250 1500 5250 1400
+Wire Wire Line
+	8100 2000 8100 3500
+Wire Wire Line
+	5750 1600 5750 1500
+Wire Wire Line
+	5750 1600 6100 1600
+Wire Wire Line
+	5750 1500 5750 1400
+Wire Wire Line
+	5750 1400 6100 1400
+Connection ~ 5750 1500
+Wire Wire Line
+	5750 3400 5750 2400
+Wire Wire Line
+	5750 2400 6100 2400
+Connection ~ 5750 2400
+Wire Wire Line
+	5750 3400 6100 3400
+Wire Wire Line
+	6700 3500 8100 3500
+Text Notes 6600 3950 0    50   Italic 0
+This gate will sink the led when /ENABLE is low.\n\nRead is /ENABLE low AND RD low\nWrite is /ENABLE low and WR high
+$EndSCHEMATC
