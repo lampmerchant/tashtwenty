@@ -1,0 +1,323 @@
+EESchema Schematic File Version 4
+EELAYER 30 0
+EELAYER END
+$Descr A4 11693 8268
+encoding utf-8
+Sheet 1 1
+Title "TashTwenty Tiny Adapter"
+Date "2021-11-28"
+Rev "1.0"
+Comp "Lostwave"
+Comment1 "https://68kmla.org"
+Comment2 "https://github.com/demik/oldworld/tree/master/EDA/DB19_IDC20"
+Comment3 ""
+Comment4 ""
+$EndDescr
+$Comp
+L Connector_Generic:Conn_02x10_Odd_Even J1
+U 1 1 61A0248C
+P 8550 3950
+F 0 "J1" H 8600 4567 50  0000 C CNN
+F 1 "Conn_02x10_Odd_Even" H 8600 4476 50  0000 C CNN
+F 2 "Connector_IDC:IDC-Header_2x10_P2.54mm_Vertical" H 8550 3950 50  0001 C CNN
+F 3 "~" H 8550 3950 50  0001 C CNN
+	1    8550 3950
+	1    0    0    -1  
+$EndComp
+$Comp
+L power:+12V #PWR0101
+U 1 1 61A06D91
+P 9500 1000
+F 0 "#PWR0101" H 9500 850 50  0001 C CNN
+F 1 "+12V" H 9515 1173 50  0000 C CNN
+F 2 "" H 9500 1000 50  0001 C CNN
+F 3 "" H 9500 1000 50  0001 C CNN
+	1    9500 1000
+	1    0    0    -1  
+$EndComp
+$Comp
+L power:+5V #PWR0102
+U 1 1 61A08275
+P 10000 1000
+F 0 "#PWR0102" H 10000 850 50  0001 C CNN
+F 1 "+5V" H 10015 1173 50  0000 C CNN
+F 2 "" H 10000 1000 50  0001 C CNN
+F 3 "" H 10000 1000 50  0001 C CNN
+	1    10000 1000
+	1    0    0    -1  
+$EndComp
+$Comp
+L power:GND #PWR0103
+U 1 1 61A096E7
+P 10500 1100
+F 0 "#PWR0103" H 10500 850 50  0001 C CNN
+F 1 "GND" H 10505 927 50  0000 C CNN
+F 2 "" H 10500 1100 50  0001 C CNN
+F 3 "" H 10500 1100 50  0001 C CNN
+	1    10500 1100
+	1    0    0    -1  
+$EndComp
+$Comp
+L power:PWR_FLAG #FLG0101
+U 1 1 61A0D42D
+P 10500 1000
+F 0 "#FLG0101" H 10500 1075 50  0001 C CNN
+F 1 "PWR_FLAG" H 10500 1173 50  0000 C CNN
+F 2 "" H 10500 1000 50  0001 C CNN
+F 3 "~" H 10500 1000 50  0001 C CNN
+	1    10500 1000
+	1    0    0    -1  
+$EndComp
+$Comp
+L power:PWR_FLAG #FLG0102
+U 1 1 61A0E66D
+P 10000 1100
+F 0 "#FLG0102" H 10000 1175 50  0001 C CNN
+F 1 "PWR_FLAG" H 10000 1273 50  0000 C CNN
+F 2 "" H 10000 1100 50  0001 C CNN
+F 3 "~" H 10000 1100 50  0001 C CNN
+	1    10000 1100
+	-1   0    0    1   
+$EndComp
+$Comp
+L power:PWR_FLAG #FLG0103
+U 1 1 61A0E936
+P 9500 1100
+F 0 "#FLG0103" H 9500 1175 50  0001 C CNN
+F 1 "PWR_FLAG" H 9500 1273 50  0000 C CNN
+F 2 "" H 9500 1100 50  0001 C CNN
+F 3 "~" H 9500 1100 50  0001 C CNN
+	1    9500 1100
+	-1   0    0    1   
+$EndComp
+Wire Wire Line
+	9500 1000 9500 1100
+Wire Wire Line
+	10000 1000 10000 1100
+Wire Wire Line
+	10500 1000 10500 1100
+$Comp
+L power:GND #PWR0104
+U 1 1 61A241FB
+P 7000 4600
+F 0 "#PWR0104" H 7000 4350 50  0001 C CNN
+F 1 "GND" H 7005 4427 50  0000 C CNN
+F 2 "" H 7000 4600 50  0001 C CNN
+F 3 "" H 7000 4600 50  0001 C CNN
+	1    7000 4600
+	1    0    0    -1  
+$EndComp
+Wire Wire Line
+	8350 3550 7000 3550
+Wire Wire Line
+	7000 3550 7000 3650
+Wire Wire Line
+	8350 3650 7000 3650
+Connection ~ 7000 3650
+Wire Wire Line
+	7000 3650 7000 3750
+Wire Wire Line
+	8350 3750 7000 3750
+Connection ~ 7000 3750
+Wire Wire Line
+	7000 3750 7000 3850
+Wire Wire Line
+	8350 3850 7000 3850
+Connection ~ 7000 3850
+Wire Wire Line
+	7000 3850 7000 4600
+NoConn ~ 8350 3950
+NoConn ~ 8850 4450
+$Comp
+L power:+5V #PWR0105
+U 1 1 61A27EB9
+P 8150 4050
+F 0 "#PWR0105" H 8150 3900 50  0001 C CNN
+F 1 "+5V" V 8165 4178 50  0000 L CNN
+F 2 "" H 8150 4050 50  0001 C CNN
+F 3 "" H 8150 4050 50  0001 C CNN
+	1    8150 4050
+	0    -1   -1   0   
+$EndComp
+$Comp
+L power:+12V #PWR0106
+U 1 1 61A289EB
+P 8150 4150
+F 0 "#PWR0106" H 8150 4000 50  0001 C CNN
+F 1 "+12V" V 8165 4278 50  0000 L CNN
+F 2 "" H 8150 4150 50  0001 C CNN
+F 3 "" H 8150 4150 50  0001 C CNN
+	1    8150 4150
+	0    -1   -1   0   
+$EndComp
+Wire Wire Line
+	8150 4050 8350 4050
+Wire Wire Line
+	8350 4150 8250 4150
+Wire Wire Line
+	8350 4250 8250 4250
+Wire Wire Line
+	8250 4250 8250 4150
+Connection ~ 8250 4150
+Wire Wire Line
+	8250 4150 8150 4150
+Wire Wire Line
+	8350 4350 8250 4350
+Wire Wire Line
+	8250 4350 8250 4250
+Connection ~ 8250 4250
+Wire Wire Line
+	8350 4450 8250 4450
+Wire Wire Line
+	8250 4450 8250 4350
+Connection ~ 8250 4350
+Text Label 8950 3550 0    50   ~ 0
+PH0
+Text Label 8950 3650 0    50   ~ 0
+PH1
+Text Label 8950 3750 0    50   ~ 0
+PH2
+Text Label 8950 3850 0    50   ~ 0
+PH3
+Text Label 8950 3950 0    50   ~ 0
+~WREQ
+Text Label 8950 4050 0    50   ~ 0
+SEL
+Text Label 8950 4150 0    50   ~ 0
+~ENABLE
+Text Label 8950 4250 0    50   ~ 0
+RD
+Text Label 8950 4350 0    50   ~ 0
+WR
+Wire Wire Line
+	8850 3550 8950 3550
+Wire Wire Line
+	8850 3650 8950 3650
+Wire Wire Line
+	8850 3750 8950 3750
+Wire Wire Line
+	8850 3850 8950 3850
+Wire Wire Line
+	8850 3950 8950 3950
+Wire Wire Line
+	8950 4050 8850 4050
+Wire Wire Line
+	8950 4150 8850 4150
+Wire Wire Line
+	8850 4250 8950 4250
+Wire Wire Line
+	8850 4350 8950 4350
+$Comp
+L Connector_Apple:DB19_Female J2
+U 1 1 61A3D54F
+P 4150 4200
+F 0 "J2" H 4328 4521 50  0000 L CNN
+F 1 "DB19_Female" H 4328 4430 50  0000 L CNN
+F 2 "Connector_Apple:DSUB-19_Male_EdgeMount_P2.77mm" H 4150 4200 50  0001 C CNN
+F 3 " ~" H 4150 4200 50  0001 C CNN
+	1    4150 4200
+	1    0    0    -1  
+$EndComp
+Wire Wire Line
+	3850 3000 2500 3000
+Wire Wire Line
+	2500 3000 2500 3200
+$Comp
+L power:GND #PWR0107
+U 1 1 61A4270D
+P 2500 5000
+F 0 "#PWR0107" H 2500 4750 50  0001 C CNN
+F 1 "GND" H 2505 4827 50  0000 C CNN
+F 2 "" H 2500 5000 50  0001 C CNN
+F 3 "" H 2500 5000 50  0001 C CNN
+	1    2500 5000
+	1    0    0    -1  
+$EndComp
+Wire Wire Line
+	3850 3200 2500 3200
+Connection ~ 2500 3200
+Wire Wire Line
+	2500 3200 2500 3400
+Wire Wire Line
+	3850 3400 2500 3400
+Connection ~ 2500 3400
+Wire Wire Line
+	2500 3400 2500 3600
+Wire Wire Line
+	3850 3600 2500 3600
+Connection ~ 2500 3600
+Wire Wire Line
+	2500 3600 2500 5000
+NoConn ~ 3850 3800
+$Comp
+L power:+5V #PWR0108
+U 1 1 61A454A8
+P 3000 4000
+F 0 "#PWR0108" H 3000 3850 50  0001 C CNN
+F 1 "+5V" V 3015 4128 50  0000 L CNN
+F 2 "" H 3000 4000 50  0001 C CNN
+F 3 "" H 3000 4000 50  0001 C CNN
+	1    3000 4000
+	0    -1   -1   0   
+$EndComp
+Wire Wire Line
+	3850 4000 3000 4000
+$Comp
+L power:+12V #PWR0109
+U 1 1 61A4699B
+P 3000 4200
+F 0 "#PWR0109" H 3000 4050 50  0001 C CNN
+F 1 "+12V" V 3015 4328 50  0000 L CNN
+F 2 "" H 3000 4200 50  0001 C CNN
+F 3 "" H 3000 4200 50  0001 C CNN
+	1    3000 4200
+	0    -1   -1   0   
+$EndComp
+NoConn ~ 3850 4600
+NoConn ~ 3850 4800
+Text Label 3750 3100 2    50   ~ 0
+PH0
+Text Label 3750 3300 2    50   ~ 0
+PH1
+Text Label 3750 3500 2    50   ~ 0
+PH2
+Text Label 3750 3700 2    50   ~ 0
+PH3
+Text Label 3750 3900 2    50   ~ 0
+~WREQ
+Text Label 3750 4100 2    50   ~ 0
+SEL
+Text Label 3750 4300 2    50   ~ 0
+~ENABLE
+Wire Wire Line
+	3000 4200 3250 4200
+Wire Wire Line
+	3850 4400 3250 4400
+Wire Wire Line
+	3250 4400 3250 4200
+Connection ~ 3250 4200
+Wire Wire Line
+	3250 4200 3850 4200
+Wire Wire Line
+	3750 4300 3850 4300
+Wire Wire Line
+	3750 4100 3850 4100
+Wire Wire Line
+	3750 3900 3850 3900
+Wire Wire Line
+	3750 3700 3850 3700
+Wire Wire Line
+	3750 3500 3850 3500
+Wire Wire Line
+	3750 3300 3850 3300
+Wire Wire Line
+	3750 3100 3850 3100
+Text Label 3750 4500 2    50   ~ 0
+RD
+Text Label 3750 4700 2    50   ~ 0
+WR
+Wire Wire Line
+	3750 4500 3850 4500
+Wire Wire Line
+	3750 4700 3850 4700
+$EndSCHEMATC
