@@ -1,0 +1,4 @@
+(sym_lib_table
+  (lib (name Connector_Apple)(type Legacy)(uri ${KIPRJMOD}/../lib/Connector_Apple.lib)(options "")(descr ""))
+  (lib (name DB19_IDC20-rescue)(type Legacy)(uri ${KIPRJMOD}/DB19_IDC20-rescue.lib)(options "")(descr ""))
+)
