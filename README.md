@@ -23,6 +23,15 @@ Due to the dearth of documentation on the DCD protocol (see below), the protocol
 namely read, write, and device identification.  Responses to other commands are faked.  Fortunately, this seems to be enough for the
 device to function properly, including formatting.
 
+The disk drive interface relies on use of the phase lines to read and write one-bit registers.  Because the microcontroller mimics the register set in code instead of programmable logic, it has a response time that is, in the worst case, approximately one microsecond.  This is not fast enough for Macs with faster processors to reliably detect that the device is present.  As such, it can only be used on Macintosh computers with 8 MHz 68000 processors.
+
+Compatible Macs:
+ * 512k (with Hard Disk 20 INIT)
+ * 512ke
+ * Plus
+ * SE
+ * Classic
+
 
 ## Technical Details
 
