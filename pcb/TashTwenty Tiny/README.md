@@ -42,6 +42,11 @@ J1 is reserver for future use, you may want to use a wire for it. (or a resistor
 | J1                    | IDC20      | 1        | IDC 2x10 Header                        | BLK 10120560       |
 | J2                    | DB19       | 1        | DB19 wire male connector               | Good luck.         |
 
+
+### BOM (external links)
+Here is a mouser link (without the case):
+- https://www.mouser.fr/ProjectManager/ProjectDetail.aspx?AccessID=6e66469657
+
 ### Building
 
 Building is straightworfard. It's recommended to start with the SD Card connector, then components, and headers + sockets last.
