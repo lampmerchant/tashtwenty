@@ -37,6 +37,7 @@ Using sockets is recommended because it will allow you to reclaim the gates and 
 J1 is reserved for future use, you may want to use a wire for it. (or a resistor leg)
 
 ### BOM (adapter board)
+This is a matching board for TashTwenty. Please use this one to avoid any damage to your computer or TashTwenty. Others adapters boards are wired differently
 
 | Reference(s)          | Value      | Quantity | Notes                                  | Part number        |
 |-----------------------|------------|----------|----------------------------------------|--------------------|
@@ -47,6 +48,10 @@ J1 is reserved for future use, you may want to use a wire for it. (or a resistor
 ### BOM (external links)
 Here is a mouser link (without the case):
 - https://www.mouser.fr/ProjectManager/ProjectDetail.aspx?AccessID=6e66469657
+
+### IDC cable
+You need a cable to connect both boards
+Any straight IDC-20 cable should work (pin 1 to pin 1, etc). Macintosh floppy cables are compatible. We used a Quadra 800 cable for prototyping (Apple P/N 590-0862-B).
 
 ## PCBs
 the PCBs are simple 2 layers boards. The gerbers are avaible in the release section.
