@@ -9,8 +9,8 @@ Date "2021-11-28"
 Rev "1.0"
 Comp "Lostwave"
 Comment1 "https://68kmla.org"
-Comment2 "https://github.com/demik/oldworld/tree/master/EDA/DB19_IDC20"
-Comment3 ""
+Comment2 "https://68kmla.org/bb/index.php?threads/tashtwenty-single-chip-dcd-hard-disk-20-interface.39357/"
+Comment3 "https://github.com/lampmerchant/tashtwenty"
 Comment4 ""
 $EndDescr
 $Comp

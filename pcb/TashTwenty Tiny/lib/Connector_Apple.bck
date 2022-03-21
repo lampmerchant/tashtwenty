@@ -1,0 +1,45 @@
+EESchema-DOCLIB  Version 2.0
+#
+$CMP 68030FE
+D Enhanced 32 bits Processor Surface Mount Version (FE)
+K 68030 68030FE Motorolla NXP Ceramic Surface Mount
+F https://www.nxp.com/docs/en/reference-manual/MC68030UM.pdf
+$ENDCMP
+#
+$CMP DB19_Female
+D 19-pin female D-SUB connector
+K female D-SUB connector
+F  ~
+$ENDCMP
+#
+$CMP Mac_Plus_ROM_HI
+D Mac Plus ROM Motherboard Socket
+K Mac Plus ROM Motherboard Socket
+F http://www.synack.net/~bbraun/plusrom/index.html
+$ENDCMP
+#
+$CMP Mac_Plus_ROM_LOW
+D Mac Plus ROM Motherboard Socket
+K Mac Plus ROM Motherboard Socket
+F http://www.synack.net/~bbraun/plusrom/index.html
+$ENDCMP
+#
+$CMP PowerMac_PDS
+D PowerMac PDS
+K Macintosh PDS Processor Direct Slot
+F ~
+$ENDCMP
+#
+$CMP SIMM-30
+D SIMM 30 pin socket
+K SIMM 30 pin 8 bit FPM EDO RAM
+F https://en.wikipedia.org/wiki/SIMM
+$ENDCMP
+#
+$CMP SIMM-68
+D SIMM 68 Pin socket
+K SIMM VRAM Macintosh
+F ~
+$ENDCMP
+#
+#End Doc Library
