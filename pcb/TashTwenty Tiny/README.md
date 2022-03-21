@@ -4,6 +4,7 @@ This is a dual PCB design, using mostly through hole components (with the exepti
 
 This folder contains the source KiKad files for the main board. Please check the DB19_IDC20 subfolder for the DB19 to IDC20 adapter. 
 
+## BOM
 ### BOM (main board)
 Here is the BOM for the main board. Part number are what was tested on prototypes board but you may find alternatives easily, especially resistors and sockets
 
@@ -22,18 +23,18 @@ Here is the BOM for the main board. Part number are what was tested on prototype
 | R7, R9, R12, R13, R14 | 10kΩ       | 5        | standard 0.25W carbon film resistor    | TRU TC-CFR0W4J0103    |
 | U1                    | PIC16F1825 | 1        | PIC 8-bit Microcontroller (DIP-14)     | PIC16F1825-I/P        |
 | U2                    | 74ACT08    | 1        | Quad TTL 2-Input AND Gate              | SN74ACT08N            |
-| U3                    | 3.3V LDO   | 1        |                                        | MCP1700-3302E/TO      |
+| U3                    | 3.3V LDO   | 1        | 3.3V LDO voltage regulator             | MCP1700-3302E/TO      |
 
 Optional
 
-| Reference(s)          | Value      | Quantity | Notes                                  | Part number         |
-|-----------------------|------------|----------|----------------------------------------|---------------------|
-| J1                    | -          | 1        | 1x2 header + jumper or wire            | -                   |
-| U1, U2				| socket     | 2        | DIP-14 socket                          | TRU 14-LC-TT        |
-| Case   				| ABS        | 1        | Instrument Case, ABS 2.6x2.6"          | HM 1593K(TBU|GY|BK) |
+| Reference(s)          | Value      | Quantity | Notes                                  | Part number           |
+|-----------------------|------------|----------|----------------------------------------|-----------------------|
+| J1                    | -          | 1        | 1x2 header + jumper or wire            | -                     |
+| U1, U2                | socket     | 2        | DIP-14 socket                          | TRU 14-LC-TT          |
+| Case                  | ABS        | 1        | Instrument Case, ABS 2.6x2.6"          | HM 1593K(TBU\|GY\|BK) |
 
-Using sockets is recommended because it will allow you to reclaim the gates and microcontroler if your board is broken.
-J1 is reserver for future use, you may want to use a wire for it. (or a resistor leg)
+Using sockets is recommended because it will allow you to reclaim the gates and microcontroler if your board is broken. This will also allow you to upgrade the firmware if a future firmware is released.
+J1 is reserved for future use, you may want to use a wire for it. (or a resistor leg)
 
 ### BOM (adapter board)
 
@@ -47,6 +48,14 @@ J1 is reserver for future use, you may want to use a wire for it. (or a resistor
 Here is a mouser link (without the case):
 - https://www.mouser.fr/ProjectManager/ProjectDetail.aspx?AccessID=6e66469657
 
-### Building
+## PCBs
+the PCBs are simple 2 layers boards. The gerbers are avaible in the release section.
+Check for the following files:
+* TTT_10.zip: main board revision 1.0
+* DB19_IDC20.zip: adapter board revision 1.0
 
+You should be use any mainstream PCB manufacturer for theses. Nothing special about them. PCB thickness should FR-4 with a 1.6mm thickness
+On JLCPCB, select "Specify a location" to the option "Remove Order Number"
+
+## Building
 Building is straightworfard. It's recommended to start with the SD Card connector, then components, and headers + sockets last.
