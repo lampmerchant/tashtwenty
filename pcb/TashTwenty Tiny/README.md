@@ -47,7 +47,7 @@ This is a matching board for TashTwenty. Please use this one to avoid any damage
 
 ### BOM (external links)
 Here is a mouser link (without the case):
-- https://www.mouser.fr/ProjectManager/ProjectDetail.aspx?AccessID=6e66469657
+- https://www.mouser.fr/ProjectManager/ProjectDetail.aspx?AccessID=d6eb8cf808
 
 ### IDC cable
 You need a cable to connect both boards
