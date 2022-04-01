@@ -34,7 +34,7 @@ Optional
 | Case                  | ABS        | 1        | Instrument Case, ABS 2.6x2.6"          | HM 1593K(TBU\|GY\|BK) |
 
 Using sockets is recommended because it will allow you to reclaim the gates and microcontroler if your board is broken. This will also allow you to upgrade the firmware if a future firmware is released.
-J1 is reserved for future use, you may want to use a wire for it. (or a resistor leg)
+J3 is reserved for future use, you may want to use a wire for it. (or a resistor leg)
 
 ### BOM (adapter board)
 This is a matching board for TashTwenty. Please use this one to avoid any damage to your computer or TashTwenty. Others adapters boards are wired differently
