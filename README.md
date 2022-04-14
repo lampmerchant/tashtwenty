@@ -23,25 +23,28 @@ Due to the dearth of documentation on the DCD protocol (see below), the protocol
 namely read, write, and device identification.  Responses to other commands are faked.  Fortunately, this seems to be enough for the
 device to function properly, including formatting.
 
-The disk drive interface relies on use of the phase lines to read and write one-bit registers.  Because the microcontroller mimics the register set in code instead of programmable logic, it has a response time that is, in the worst case, approximately one microsecond.  This interferes with the Mac's ability to detect that devices are present, since it expects effectively-instantaneous response time, and as a result, certain Macs are not able to detect devices beyond the first.
+The disk drive interface relies on use of the phase lines to read and write one-bit registers.  Because the microcontroller mimics the register set in code instead of programmable logic, it has a response time that is, in the worst case, approximately one microsecond.  This may interfere with its compatibility with faster Macs, though it is not known to do so at this point.
+
+Certain Macs may have a limitation imposed by their ROM on the number of DCDs they support.  
 
 Known Compatible Macs:
-  * With multiple devices:
+  * With up to four devices:
     * 512ke
     * Plus
-  * With one device:
-    * SE
-    * Classic
+  * With up to two devices (chaining more than two causes only first to be recognized):
     * Classic II
 
 Suspected Compatible Macs:
-  * With multiple devices:
+  * With up to four devices:
     * 512k (with Hard Disk 20 extension)
-  * With one device:
+  * With up to two devices:
+    * SE
+    * Classic
     * Portable
     * IIci
     * IIsi
     * LC (using internal secondary drive connector, if stuffed)
+    * LC II (using floppy connector and clip onto !ENBL2 on SWIM IC)
     * IIx (using internal secondary drive connector) (requires nonstandard ROM)
     * IIcx (requires nonstandard ROM)
     * SE/30 (requires nonstandard ROM)
