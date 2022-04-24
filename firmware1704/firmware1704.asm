@@ -90,8 +90,8 @@ IWMCNT0	equ	0	; "
 M_FAIL	equ	7	;Set when there's been a failure on the MMC interface
 M_CMDLR	equ	6	;Set when R3 or R7 is expected (5 bytes), not R1
 M_CMDRB	equ	5	;Set when an R1b is expected (busy signal after reply)
-M_MBRD	equ	4	;Set when a multiblock read is in progress
-M_MBWR	equ	3	;Set when a multiblock write is in progress
+M_RDCMD	equ	4	;Set when state machine should do a read command
+M_ONGWR	equ	3	;Set when state machine shouldn't stop tran on a write
 M_BKADR	equ	2	;Set when block (rather than byte) addressing is in use
 M_CDVER	equ	1	;Set when dealing with a V2.0+ card, clear for 1.0
 
@@ -127,7 +127,7 @@ M_CDVER	equ	1	;Set when dealing with a V2.0+ card, clear for 1.0
 	M_ADR0	;Fourth (low) byte of the address, last byte of R3/R7 response
 	M_CRCH	;CRC16 high byte
 	M_CRCL	;CRC16 low byte
-	X6	;Various purposes
+	M_STATE	;State of card state machine
 	X5	;Various purposes
 	X4	;Various purposes
 	X3	;Various purposes
@@ -526,11 +526,9 @@ Unselected
 	tris	7		; done this already, but.. belt and suspenders)
 	movlb	3		;Deassert !HSHK
 	clrf	TXREG		; "
-	movlb	0		;Deassert !CS and next !ENBL (the interrupt
-	movlw	B'00111111'	; handler will have deasserted next !ENBL
-	movwf	PORTC		; already, but.. belt and suspenders)
-	movlw	B'00111111'	; "
-	movwf	PORTA		; "
+	movlb	0		;Deassert next !ENBL (the interrupt handler
+	movlw	B'00111111'	; will have deasserted next !ENBL already,
+	movwf	PORTA		; but.. belt and suspenders)
 	clrf	DEVNUM		;Reset selected device number to zero
 	btfsc	EN_PORT,EN_PIN	;Wait for Mac to drive !ENBL low
 	bra	$-1		; "
@@ -862,6 +860,16 @@ SysIni6	addfsr	FSR0,16		;Move pop pointer ahead to next entry
 ;;; Receiver ;;;
 
 Receiver
+	movlw	4		;Spend about 262.144 ms waiting for the state
+	movwf	X1		; machine to try and get the card back to
+Receiv0	clrf	TMR1H		; waiting for a command or a write token, which
+	clrf	TMR1L		; is about how long we have before Mac tires of
+	movlw	MSSWrEtTok - MSS; waiting for us to acknowledge a command (we
+	btfss	M_FLAGS,M_ONGWR	; actually have ~350 ms, but be cautious);
+	movlw	MSSWaitCmd - MSS; hopefully this will be enough, spec says that
+	call	MmcWaitState	; writes may take up to 200 ms
+	decfsz	X1,F		; "
+	bra	Receiv0		; "
 	movlb	3		;Assert !HSHK to signal to Mac that we're
 	btfss	TXSTA,TRMT	; ready to receive
 	bra	$-1		; "
@@ -1022,25 +1030,22 @@ BadChk1	movlp	0		;Return to the idle loop
 	goto	IdleLoop	; "
 
 CmdRead
-	call	MmcStopOngoing	;Make sure any ongoing write is stopped
 	movlw	ERRCODE		;Ready an error code in case we need to jump
 	movwf	RESPERR		; into the placeholder response routine
 	call	SetupCmdAddr	;Set up the card address for this command
 	btfsc	STATUS,C	;If the read is out of bounds, send an error
 	goto	CmdPlaceholder	; response
-CmdRea0	movlw	0x51		;Set up a read command for the card (R1-type
-	movwf	M_CMDN		; response)
-	bcf	M_FLAGS,M_CMDLR	; "
-	bcf	M_FLAGS,M_CMDRB	; "
-	bcf	CS_PORT,CS_PIN	;Assert !CS
-	call	MmcCmd		;Send the read command
-	movf	M_CMDN,W	;Treat any error flag as a failed command
-	andlw	B'11111110'	; "
-	btfss	STATUS,Z	; "
-	bsf	M_FLAGS,M_FAIL	; "
-	btfss	M_FLAGS,M_FAIL	;If no failures up to this point, prepare the
-	call	MmcGetData	; card to read out data
-	btfsc	M_FLAGS,M_FAIL	;If there was any failure, respond with a
+CmdRea0	bsf	M_FLAGS,M_RDCMD	;Set the state machine to do a read for us
+	bcf	M_FLAGS,M_ONGWR	;Cancel any ongoing write
+	movlw	4		;Spend about 262.144 ms waiting for the state
+	movwf	X1		; machine to prepare the card to read out the
+CmdRea5	clrf	TMR1H		; data, which is about how long we have before
+	clrf	TMR1L		; Mac tires of waiting for a response from us
+	movlw	MSSRdData - MSS	; (we actually have ~350 ms, but be cautious)
+	call	MmcWaitState	; "
+	decfsz	X1,F		; "
+	bra	CmdRea5		; "
+	btfsc	PIR1,TMR1IF	;If there was any failure, respond with a
 	goto	CmdPlaceholder	; placeholder with an error code
 	clrf	M_CRCH		;Clear the CRC registers for our read of the
 	clrf	M_CRCL		; block
@@ -1082,6 +1087,8 @@ CmdRea2	moviw	FSR0++		;Pick up the next byte to write from the queue
 	bra	CmdRea2		; "
 	decfsz	X3,F		; "
 	bra	CmdRea2		; "
+	movlw	MSSWaitCmd - MSS;Finished with read, so set state back to
+	movwf	M_STATE		; WaitCmd
 	movf	M_CRCH,W	;Feeding the CRC through the CRC registers
 	iorwf	M_CRCL,W	; should leave it at zero if the CRC is right;
 	btfss	STATUS,Z	; if it's not, send the wrong checksum so Mac
@@ -1104,7 +1111,6 @@ CmdRea4	comf	CHKSUM,W	;CRC failed, so write what we know is the wrong
 	bra	CmdRea3
 
 CmdStatus
-	call	MmcStopOngoing	;Make sure any ongoing write is stopped
 	movlw	0x21		;Point to the partition information block for
 	movwf	FSR0H		; the selected device
 	swapf	DEVNUM,W	; "
@@ -1115,26 +1121,24 @@ CmdStatus
 	xorlw	0xAF		; built-in icon, not one loaded from the card,
 	btfsc	STATUS,Z	; so skip setting up the read
 	bra	CmdSta0		; "
-	movlw	0x51		;Set up a read command for the card (R1-type
-	movwf	M_CMDN		; response)
-	bcf	M_FLAGS,M_CMDLR	; "
-	bcf	M_FLAGS,M_CMDRB	; "
+	bsf	M_FLAGS,M_RDCMD	;Set the state machine to do a read for us
+	bcf	M_FLAGS,M_ONGWR	;Cancel any ongoing write
 	clrf	M_ADR3		;Point to the address of the icon to be loaded
 	clrf	M_ADR2		; "
 	clrf	M_ADR1		; "
 	moviw	4[FSR0]		; "
 	movwf	M_ADR0		; "
-	bcf	CS_PORT,CS_PIN	;Assert !CS
 	call	MmcConvAddr	;Convert address to bytes if necessary
-	btfss	M_FLAGS,M_FAIL	;If the address conversion didn't fail, send
-	call	MmcCmd		; the read command
-	movf	M_CMDN,W	;Treat any error flag as a failed command
-	andlw	B'11111110'	; "
-	btfss	STATUS,Z	; "
-	bsf	M_FLAGS,M_FAIL	; "
-	btfsc	M_FLAGS,M_FAIL	;If the operation failed, use the built-in icon
-	bra	CmdSta0		; instead
-	call	MmcGetData	;Get the card ready to read out data
+	movlw	4		;Spend about 262.144 ms waiting for the state
+	movwf	X1		; machine to prepare the card to read out the
+CmdSta8	clrf	TMR1H		; icon, which is about how long we have before
+	clrf	TMR1L		; Mac tires of waiting for a response from us
+	movlw	MSSRdData - MSS	; (we actually have ~350 ms, but be cautious)
+	call	MmcWaitState	; "
+	decfsz	X1,F		; "
+	bra	CmdSta8		; "
+	btfsc	PIR1,TMR1IF	;If it timed out, use the built in icon instead
+	bra	CmdSta0		; "
 	movlw	0x22		;Point the push pointer off into space and
 	movwf	FSR1H		; read and throw away the first 256 bytes of
 	movlw	0		; the icon sector
@@ -1187,7 +1191,7 @@ CmdSta3	movlw	0		; area (52 bytes), all as zeroes
 	moviw	4[FSR0]		;If the partition type is 0xAF or we had a fail
 	xorlw	0xAF		; while reading from the card, we're using the
 	btfss	STATUS,Z	; built-in icon, so skip ahead to do that
-	btfsc	M_FLAGS,M_FAIL	; "
+	btfsc	PIR1,TMR1IF	; "
 	bra	CmdSta4		; "
 	movlw	0		;Copy 256 bytes from the card to the Mac
 	call	MmcCopyData	; "
@@ -1232,8 +1236,12 @@ CmdSta7	movlw	0		; area (52 bytes), all as zeroes
 	movf	CHKSUM,W	;Finish the block off with the checksum
 	call	WriteByte	; "
 	btfss	X2,0		;If we didn't use the built-in icon, finish up
-	call	MmcCheckCrc	; with the card by ignoring the CRC
-	bsf	CS_PORT,CS_PIN	;Deassert !CS
+	call	MmcCheckCrc	; with the card by ignoring the CRC and setting
+	movlw	MSSWaitCmd - MSS; the state back to WaitCmd and deasserting !CS
+	btfss	X2,0		; "
+	movwf	M_STATE		; "
+	btfss	X2,0		; "
+	bsf	CS_PORT,CS_PIN	; "
 	call	ReturnToIdle	;Return to the idle state
 	movlp	0		;Return to the idle loop
 	goto	IdleLoop	; "
@@ -1244,8 +1252,12 @@ CmdWrite
 	call	SetupCmdAddr	;Set up the card address for this command
 	btfsc	STATUS,C	;If the write is out of bounds, send an error
 	goto	WaitToFinish	; response after we've received the command
-	btfsc	M_FLAGS,M_MBWR	;If we're starting a new write even though a
-	bra	CmdWri7		; multiblock write is ongoing, handle it
+	movf	M_STATE,W	;If we're not in the await-command state, we
+	xorlw	MSSWaitCmd - MSS; won't be able to do this write, so send an
+	btfss	STATUS,Z	; error response
+	goto	WaitToFinish	; "
+	btfsc	M_FLAGS,M_ONGWR	;If we're starting a new write even though a
+	bra	CmdWri6		; multiblock write is ongoing, handle it
 	movlw	0x59		;Set up a multiblock write command for the card
 	movwf	M_CMDN		; (R1-type reply)
 	bcf	M_FLAGS,M_CMDLR	; "
@@ -1258,7 +1270,7 @@ CmdWrite
 	bsf	M_FLAGS,M_FAIL	; "
 	btfsc	M_FLAGS,M_FAIL	;If there was any failure, respond with a
 	goto	WaitToFinish	; placeholder with an error code
-	bsf	M_FLAGS,M_MBWR	;Flag that a multiblock write is in progress
+	bsf	M_FLAGS,M_ONGWR	;Flag that a multiblock write is in progress
 CmdWri0	movlb	4		;Clock a dummy byte while keeping MOSI high
 	movlw	0xFF		; "
 	movwf	SSP1BUF		; "
@@ -1339,37 +1351,54 @@ CmdWri4	movlb	4		;Clock the byte out to the card
 	bra	$-1		; "
 	movf	SSP1BUF,W	;Save data response to check later
 	movwf	X2		; "
-	call	MmcWaitBusy	;Wait for the card not to be busy anymore
-	movlb	0		;If the data response byte indicated that the
-	movf	X2,W		; write succeeded, skip ahead
+	movlw	0xFF		;Start clocking the first is-still-busy? byte
+	movwf	SSP1BUF		; "
+	movlb	0		; "
+	bcf	PIR1,SSP1IF	;Clear SSP int flag so it knows when not busy
+	movlw	MSSWrBusy - MSS	;Set the card state to WrBusy so state machine
+	movwf	M_STATE		; knows
+	decf	CMDCNT,W	;If this was the last block, clear the ongoing
+	btfsc	STATUS,Z	; write flag so state machine knows not to stop
+	bcf	M_FLAGS,M_ONGWR	; waiting on a write or stop tran token
+	movf	X2,W		;Check if the write succeeded
 	andlw	B'00011111'	; "
 	xorlw	B'00000101'	; "
-	btfsc	STATUS,Z	; "
-	bra	CmdWri6		; "
-CmdWri5	call	MmcStopOngoing	;Stop the ongoing write
-	btfss	IWMFLAG,IWMOVER	;Wait until the Mac's transmission is over
+	btfsc	STATUS,Z	;If it did, clear the error flag so we send a
+	clrf	RESPERR		; success response
+	btfss	STATUS,Z	;If it didn't, clear the ongoing write flag so
+	bcf	M_FLAGS,M_ONGWR	; the write ends here
+CmdWri5	btfss	IWMFLAG,IWMOVER	;Wait until the Mac's transmission is over
 	bra	$-1		; "
-	call	ReturnToIdle	;If the checksum was wrong, send a NAK, if it
-	movf	CHKSUM,W	; was right, send an error
-	btfss	STATUS,Z	; "
-	goto	BadChecksum	; "
+	movf	CHKSUM,W	;If the checksum didn't match, clear the
+	btfss	STATUS,Z	; ongoing write flag because the write stops
+	bcf	M_FLAGS,M_ONGWR	; here
+	clrf	TMR1H		;Spend about 65.536 ms, which is about how long
+	clrf	TMR1L		; we have before Mac timeouts waiting for us to
+	movlw	MSSWrEtTok - MSS; return to idle, waiting for the state machine
+	btfss	M_FLAGS,M_ONGWR	; to try and get the card back to waiting for
+	movlw	MSSWaitCmd - MSS; a command or a write token (we actually have
+	call	MmcWaitState	; ~90 ms, but let's be cautious)
+	call	ReturnToIdle	;That's long enough, return us to idle
+	movf	CHKSUM,W	;If the checksum was wrong, send a NAK, else
+	btfss	STATUS,Z	; send either a failure or success depending
+	goto	BadChecksum	; on RESPERR
 	goto	CmdPlaceholder	; "
-CmdWri6	decf	CMDCNT,W	;If this was the last block in the write, stop
-	btfsc	STATUS,Z	; the ongoing write
-	call	MmcStopOngoing	; "
-	clrf	RESPERR		;Send a success response
-	call	ReturnToIdle	; "
-	goto	CmdPlaceholder	; "
-CmdWri7	movlw	1		;In the unlikely event Mac tried to start a new
+CmdWri6	movlw	1		;In the unlikely event Mac tried to start a new
 	movwf	CHKSUM		; write while one was ongoing, pretend there
 	bra	CmdWri5		; was a bad checksum so it tries again
 
 CmdWriteCont
 	movlw	ERRCODE		;Ready an error code in case we need to jump
 	movwf	RESPERR		; into the placeholder response routine
-	btfsc	M_FLAGS,M_MBWR	;If a multibyte write is already ongoing, as it
-	bra	CmdWri0		; should be, jump into the middle of CmdWrite,
-	goto	WaitToFinish	; otherwise send an error response
+	btfss	M_FLAGS,M_ONGWR	;If a write isn't ongoing as it should be,
+	bra	CmdWrC0		; handle this
+	movf	M_STATE,W	;If we're not in the await-token state, we
+	xorlw	MSSWrEtTok - MSS; won't be able to do this write, handle this
+	btfss	STATUS,Z	; "
+	bra	CmdWrC0		; "
+	bra	CmdWri0		;Else jump into the middle of CmdWrite
+CmdWrC0	bcf	M_FLAGS,M_ONGWR	;If something went wrong, end the ongoing write
+	goto	WaitToFinish	; and send an error response
 
 
 ;;; Subprograms ;;;
@@ -1398,21 +1427,21 @@ SetupCmdAddr
 	movlw	0		; "
 	addwfc	CMDHIGH,W	; "
 	movwf	M_ADR2		; "
-	moviw	5[FSR0]		;If the partition size is less than or equal to
+	moviw	7[FSR0]		;If the partition size is less than or equal to
 	subwf	M_ADR0,W	; the maximum block number accessed, return
 	moviw	6[FSR0]		; with carry set
 	subwfb	M_ADR1,W	; "
-	moviw	7[FSR0]		; "
+	moviw	5[FSR0]		; "
 	subwfb	M_ADR2,W	; "
 	btfsc	STATUS,C	; "
 	bra	SetCmA0		; "
 	movf	INDF0,W		;Move the starting block of the partition into
 	movwf	M_ADR3		; the card address registers
-	moviw	1[INDF0]	; "
+	moviw	1[FSR0]		; "
 	movwf	M_ADR2		; "
-	moviw	2[INDF0]	; "
+	moviw	2[FSR0]		; "
 	movwf	M_ADR1		; "
-	moviw	3[INDF0]	; "
+	moviw	3[FSR0]		; "
 	addwf	CMDLOW,W	;Add the block address from the command to it
 	movwf	M_ADR0		; "
 	movf	CMDMED,W	; "
@@ -1587,6 +1616,7 @@ ReqSnd1	bsf	STATUS,Z	;We've successfully requested to send, set the
 ;Initialize MMC card.  Sets M_FAIL on fail.  Trashes X0 through X3.
 MmcInit
 	clrf	M_FLAGS		;Make sure flags are all clear to begin with
+	clrf	M_STATE		;Make sure state starts at awaiting command
 	call	MmcIni0		;Call into the function below
 	bsf	CS_PORT,CS_PIN	;Always deassert !CS
 	movf	WREG,W		;If the init function returned a code other
@@ -2055,40 +2085,206 @@ MmcChe0	movlw	0xFF		;Clock the low CRC byte out of the card
 	movlb	0		; return
 	return			; "
 
-;Stop a multiblock read or write, if one is ongoing, and deassert !CS.  Sets
-; M_FAIL on fail.  Trashes X0 and X1.
-MmcStopOngoing
-	bcf	M_FLAGS,M_FAIL	;Assume no failure to start with
-	btfsc	M_FLAGS,M_MBWR	;If there's an ongoing write operation, make it
-	bra	MmcSto0		; stop
-	btfss	M_FLAGS,M_MBRD	;If there's not an ongoing read operation, this
-	return			; function was called needlessly, return
-	movlw	0x4C		;Send a CMD12 to stop the ongoing read, R1b
-	movwf	M_CMDN		; reply type
-	clrf	M_ADR3		; "
-	clrf	M_ADR2		; "
-	clrf	M_ADR1		; "
-	clrf	M_ADR0		; "
-	bcf	M_FLAGS,M_CMDLR	; "
-	bsf	M_FLAGS,M_CMDRB	; "
-	call	MmcCmd		; "
-	bcf	M_FLAGS,M_MBRD	;Clear the ongoing multiblock read flag
-	bsf	CS_PORT,CS_PIN	;Deassert !CS
-	return
-MmcSto0	movlb	4		;Switch to the bank with the SSP registers
-	movlw	0xFD		;Clock the end-of-data token into the MMC card
+;Try to advance to the state requested in W, timing out if Timer1 overflows.
+; Trashes X0.
+MmcWaitState
+	movwf	X0		;Save the state caller wants to get to
+	movlw	B'00110001'	;Turn on Timer1
+	movwf	T1CON		; "
+	bcf	PIR1,TMR1IF	;Clear the Timer1 interrupt flag if it was set
+	movf	M_STATE,W	;If we're already in the state caller wants to
+	xorwf	X0,W		; be in, skip ahead
+	btfsc	STATUS,Z	; "
+	bra	MmcWaS1		; "
+MmcWaS0	call	MmcStepState	;Step the state
+	movf	M_STATE,W	;If we're now in the state caller wants to be
+	xorwf	X0,W		; in, skip ahead
+	btfsc	STATUS,Z	; "
+	bra	MmcWaS1		; "
+	btfsc	PIR1,TMR1IF	;If Timer1 overflowed, skip ahead
+	bra	MmcWaS2		; "
+	bra	MmcWaS0		;Loop until something happens
+MmcWaS1	bcf	T1CON,TMR1ON	;Stop Timer1 and clear its interrupt flag so
+	bcf	PIR1,TMR1IF	; caller knows we're in the state requested and
+	return			; did not time out
+MmcWaS2	bcf	T1CON,TMR1ON	;Stop Timer1 and leave its interrupt flag set
+	return			; so caller knows a timeout occurred
+
+;State machine to ensure that the card stays in a good state.
+MmcStepState
+	btfss	PIR1,SSP1IF	;If the SSP is busy, we can't do anything, so
+	return			; return
+	movlb	4		;Switch depending on the current state
+	movf	M_STATE,W	; "
+	call	MSSCall		; "
+	movwf	M_STATE		;Save the returned value in W as the new state
+	movlb	0		; and return
+	movlp	8		; "
+	return			; "
+MSSCall	brw
+MSS
+MSSWaitCmd
+	btfss	M_FLAGS,M_RDCMD	;If we're not set to do a read command, cycle
+	retlw	MSSWaitCmd - MSS; back to this state doing nothing
+	movlb	0		;Assert !CS
+	bcf	CS_PORT,CS_PIN	; "
+	movlb	4		; "
+	movlw	0x51		;Clock out the command byte for a read
 	movwf	SSP1BUF		; "
-	btfss	SSP1STAT,BF	; "
-	bra	$-1		; "
-	movlw	0xFF		;Clock a dummy byte while keeping MOSI high
+	movlw	0xE8		;Set up the CRC register with the CRC7 of the
+	movwf	M_CRCL		; read command byte
+	movlb	0		;Clear the SSP interrupt flag because it's in
+	bcf	PIR1,SSP1IF	; use now
+	retlw	MSSRdCmd1 - MSS	;Transition to the next read command state
+MSSRdCmd1
+	movf	M_ADR3,W	;Clock out the high byte of the address
 	movwf	SSP1BUF		; "
-	btfss	SSP1STAT,BF	; "
-	bra	$-1		; "
-	call	MmcWaitBusy	;Wait for the card to not be busy anymore
-	movlb	0		;Return to the default bank
-	bcf	M_FLAGS,M_MBWR	;Clear the ongoing multiblock write flag
-	bsf	CS_PORT,CS_PIN	;Deassert !CS
-	return
+	movlp	high LutCrc7	;Update the CRC for the command
+	xorwf	M_CRCL,W	; "
+	callw			; "
+	movwf	M_CRCL		; "
+	movlb	0		;Clear the SSP interrupt flag because it's in
+	bcf	PIR1,SSP1IF	; use now
+	retlw	MSSRdCmd2 - MSS	;Transition to the next read command state
+MSSRdCmd2
+	movf	M_ADR2,W	;Clock out the next byte of the address
+	movwf	SSP1BUF		; "
+	movlp	high LutCrc7	;Update the CRC for the command
+	xorwf	M_CRCL,W	; "
+	callw			; "
+	movwf	M_CRCL		; "
+	movlb	0		;Clear the SSP interrupt flag because it's in
+	bcf	PIR1,SSP1IF	; use now
+	retlw	MSSRdCmd3 - MSS	;Transition to the next read command state
+MSSRdCmd3
+	movf	M_ADR1,W	;Clock out the next byte of the address
+	movwf	SSP1BUF		; "
+	movlp	high LutCrc7	;Update the CRC for the command
+	xorwf	M_CRCL,W	; "
+	callw			; "
+	movwf	M_CRCL		; "
+	movlb	0		;Clear the SSP interrupt flag because it's in
+	bcf	PIR1,SSP1IF	; use now
+	retlw	MSSRdCmd4 - MSS	;Transition to the next read command state
+MSSRdCmd4
+	movf	M_ADR0,W	;Clock out the low byte of the address
+	movwf	SSP1BUF		; "
+	movlp	high LutCrc7	;Update the CRC for the command
+	xorwf	M_CRCL,W	; "
+	callw			; "
+	movwf	M_CRCL		; "
+	movlb	0		;Clear the SSP interrupt flag because it's in
+	bcf	PIR1,SSP1IF	; use now
+	retlw	MSSRdCmd5 - MSS	;Transition to the next read command state
+MSSRdCmd5
+	movf	M_CRCL,W	;Clock out the CRC for the command
+	movwf	SSP1BUF		; "
+	bcf	M_FLAGS,M_RDCMD	;Read command complete, M_ADR* are free
+	movlb	0		;Clear the SSP interrupt flag because it's in
+	bcf	PIR1,SSP1IF	; use now
+	retlw	MSSRdCmd6 - MSS	;Transition to the next read command state
+MSSRdCmd6
+	movlw	0xFF		;Clock first is-still-busy? byte out of the
+	movwf	SSP1BUF		; card
+	movlb	0		;Clear the SSP interrupt flag because it's in
+	bcf	PIR1,SSP1IF	; use now
+	retlw	MSSRdCmd7 - MSS	; "
+MSSRdCmd7
+	btfss	SSP1BUF,7	;If MSB is set, this isn't an R1 response byte,
+	bra	$+6		; so clock out another byte and try again
+	movlw	0xFF		; "
+	movwf	SSP1BUF		; "
+	movlb	0		; "
+	bcf	PIR1,SSP1IF	; "
+	retlw	MSSRdCmd7 - MSS	; "
+	movf	SSP1BUF,W	;If MSB is clear but an error bit is set, the
+	andlw	B'11111110'	; command was not processed, so go back to the
+	btfsc	STATUS,Z	; WaitCmd state after deasserting !CS
+	bra	$+4		; "
+	movlb	0		; "
+	bsf	CS_PORT,CS_PIN	; "
+	retlw	MSSWaitCmd - MSS; "
+	movlw	0xFF		;If all error bits are clear in the response
+	movwf	SSP1BUF		; byte, clock out the first is-read-token? byte
+	movlb	0		; "
+	bcf	PIR1,SSP1IF	; "
+	retlw	MSSRdTok - MSS	; "
+MSSRdTok
+	movf	SSP1BUF,W	;Check if the byte read from the card is the
+	xorlw	0xFE		; read token
+	btfsc	STATUS,Z	;If the byte read was not the read token, start
+	bra	$+6		; the next byte clocking out and remain in this
+	movlw	0xFF		; state for next call
+	movwf	SSP1BUF		; "
+	movlb	0		; "
+	bcf	PIR1,SSP1IF	; "
+	retlw	MSSRdTok - MSS	; "
+	movlw	0xFD		;If byte read was the read token, transition
+	movwf	M_CRCH		; to RdData using CRC register as an up counter
+	movwf	M_CRCL		; set to -515 (512 bytes + 2 CRC bytes + 1),
+	retlw	MSSRdData - MSS	; assuming we have to throw away the read data
+MSSRdData
+	incf	M_CRCL,F	;Step the up counter
+	btfsc	STATUS,Z	; "
+	incf	M_CRCH,F	; "
+	btfss	STATUS,Z	;If the up counter overflowed, deassert !CS
+	bra	$+4		; and reset the state to WaitCmd without
+	movlb	0		; starting a byte clocking
+	bsf	CS_PORT,CS_PIN	; "
+	retlw	MSSWaitCmd - MSS; "
+	movlw	0xFF		;Start the next byte to read clocking out and
+	movwf	SSP1BUF		; stay in this state for next time
+	movlb	0		; "
+	bcf	PIR1,SSP1IF	; "
+	retlw	MSSRdData - MSS	; "
+MSSWrEtTok
+	btfsc	M_FLAGS,M_ONGWR	;If there's an ongoing write, don't proceed in
+	retlw	MSSWrEtTok - MSS; sending an end tran token
+	movlw	0xFD		;Start an end tran token clocking
+	movwf	SSP1BUF		; "
+	movlb	0		;Clear the SSP interrupt flag because it's in
+	bcf	PIR1,SSP1IF	; use now
+	retlw	MSSEtJnk1 - MSS	;Transition to EtJnk1
+MSSEtJnk1
+	movlw	0xFF		;Byte we got in when we clocked out the end
+	movwf	SSP1BUF		; tran token is junk, so is the next one
+	movlb	0		;Clear the SSP interrupt flag because it's in
+	bcf	PIR1,SSP1IF	; use now
+	retlw	MSSEtJnk2 - MSS	;Transition to EtJnk2
+MSSEtJnk2
+	movlw	0xFF		;Byte we got in from previous state is junk,
+	movwf	SSP1BUF		; the one we're clocking now is legit
+	movlb	0		;Clear the SSP interrupt flag because it's in
+	bcf	PIR1,SSP1IF	; use now
+	retlw	MSSEtBusy - MSS	;Transition to EtBusy
+MSSEtBusy
+	movf	SSP1BUF,W	;If the byte we read out of the card is not all
+	btfsc	STATUS,Z	; zeroes, deassert !CS and transition to
+	bra	$+4		; WaitCmd
+	movlb	0		; "
+	bsf	CS_PORT,CS_PIN	; "
+	retlw	MSSWaitCmd - MSS; "
+	movlw	0xFF		;If the byte we read out of the card is all
+	movwf	SSP1BUF		; zeroes, clock the next one out while keeping
+	movlb	0		; MOSI high and stay in this state
+	bcf	PIR1,SSP1IF	; "
+	retlw	MSSEtBusy - MSS	; "
+MSSWrBusy
+	movf	SSP1BUF,W	;If the byte clocked in is 0x00, clock another
+	btfss	STATUS,Z	; byte out and return to this state
+	bra	$+6		; "
+	movlw	0xFF		; "
+	movwf	SSP1BUF		; "
+	movlb	0		; "
+	bcf	PIR1,SSP1IF	; "
+	retlw	MSSWrBusy - MSS	; "
+	btfsc	M_FLAGS,M_ONGWR	;If there's an ongoing write, transition to let
+	retlw	MSSWrEtTok - MSS; the caller send a data token if it wants to
+	movlw	0xFD		;Else, start an end tran token clocking
+	movwf	SSP1BUF		; "
+	movlb	0		;Clear the SSP interrupt flag because it's in
+	bcf	PIR1,SSP1IF	; use now
+	retlw	MSSEtJnk1 - MSS	;Transition to EtJnk1
 
 
 ;;; End of Program ;;;
