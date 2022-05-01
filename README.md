@@ -38,7 +38,7 @@ Certain Macs may have a limitation imposed by their ROM on the number of DCDs th
 | LC†        | 2?         | 2?         |
 | LC II§     | 2?         | 2?         |
 | IIx†‡      | 2?         | 2?         |
-| IIcx‡      | 2?         | 2?         |
+| IIcx‡      | 2          | 2?         |
 | SE/30‡     | 2?         | 2?         |
 | Classic II | 2          | 2          |
 
