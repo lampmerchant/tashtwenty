@@ -23,7 +23,9 @@ The disk drive interface relies on use of the phase lines to read and write one-
 Certain Macs may have a limitation imposed by their ROM on the number of DCDs they support.  
 
 
-### Compatibility Matrix
+### Compatibility
+
+#### Hardware
 
 | Macintosh  | PIC16F1825 | PIC16F1704 |
 | ---------- | ---------- | ---------- |
@@ -51,6 +53,15 @@ Certain Macs may have a limitation imposed by their ROM on the number of DCDs th
 † Requires use of the secondary internal floppy drive header
 
 ‡ Requires use of a nonstandard ROM
+
+
+#### System Software
+
+| Version | Compatible? |
+| ------- | ----------- |
+| 6.0.8   | Yes         |
+| 7.1     | Yes         |
+| 7.5     | No          |
 
 
 ## Technical Details
