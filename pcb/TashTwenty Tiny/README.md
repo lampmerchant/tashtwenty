@@ -45,7 +45,6 @@ This is a matching board for TashTwenty. Please use this one to avoid any damage
 | J1                    | IDC20      | 1        | IDC 2x10 Header                        | BLK 10120560       |
 | J2                    | DB19       | 1        | DB19 wire male connector               | Good luck.         |
 
-
 ### BOM (external links)
 Here is a mouser link (without the case):
 - https://www.mouser.fr/ProjectManager/ProjectDetail.aspx?AccessID=13c3076e24
@@ -53,6 +52,7 @@ Here is a mouser link (without the case):
 ### IDC cable
 You need a cable to connect both boards
 Any straight IDC-20 cable should work (pin 1 to pin 1, etc). Macintosh floppy cables are compatible. We used a Quadra 800 cable for prototyping (Apple P/N 590-0862-B).
+If you are looking for a new one, a compatible assembly is made buy Advantech under the part number PCL-10120-1E.
 
 ## PCBs
 the PCBs are simple 2 layers boards. The gerbers are avaible in the release section.
