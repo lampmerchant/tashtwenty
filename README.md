@@ -2,12 +2,9 @@
 
 ## Elevator Pitch
 
-It's a DCD (the interface used by the Hard Disk 20 to plug in through the disk port) interface, contained entirely within a PIC16F1825
-(14 pins, ~$1.70) microcontroller. It bit-bangs the low-level IWM protocol using the read/write and phase lines on the "DB"-19 disk
-port, no programmable logic devices of any kind required.
+It's a DCD (the interface used by the Hard Disk 20 to plug in through the disk port) interface, contained entirely within a PIC16F1825 (14 pins, ~$1.84) or PIC16F1704 (14 pins, ~$1.39) microcontroller. It bit-bangs the low-level IWM protocol using the read/write and phase lines on the "DB"-19 disk port, no programmable logic devices of any kind required.
 
-It interfaces to an MMC card and can emulate up to four DCD devices.  It also has an enable output which can be used to
-chain more DCD devices (though Mac OS only supports a total of four) and a floppy disk drive.
+It interfaces to an MMC or compatible card and can emulate up to four DCD devices.  It also has an enable output which can be used to chain more DCD devices (though ROMs only support a maximum of four) and a floppy disk drive.
 
 (Despite the name, there is nothing limiting it to 20 megabytes.)
 
@@ -19,25 +16,70 @@ Functional, though not rigorously tested.
 
 ## Caveats
 
-Due to the dearth of documentation on the DCD protocol (see below), the protocol only implements the commands whose formats are known,
-namely read, write, and device identification.  Responses to other commands are faked.  Fortunately, this seems to be enough for the
-device to function properly, including formatting.
+Due to the dearth of documentation on the DCD protocol (see below), the protocol only implements the commands whose formats are known, namely read, write, and device identification.  Responses to other commands are faked.  Fortunately, this seems to be enough for the device to function properly, including formatting.
 
-The disk drive interface relies on use of the phase lines to read and write one-bit registers.  Because the microcontroller mimics the register set in code instead of programmable logic, it has a response time that is, in the worst case, approximately one microsecond.  This is not fast enough for Macs with faster processors to reliably detect that the device is present.  As such, it can only be used on Macintosh computers with 8 MHz 68000 processors.
+The disk drive interface relies on use of the phase lines to read and write one-bit registers.  Because the PIC16F1825 firmware mimics the register set in code instead of programmable logic, it has a response time that is, in the worst case, approximately one microsecond.  This may interfere with the ability of faster Macs to detect it, though it is not known to do so at this point.  The PIC16F1704 firmware mimics the register set in logic and responds in effect instantly.
 
-Compatible Macs:
- * 512k (with Hard Disk 20 INIT)
- * 512ke
- * Plus
- * SE
- * Classic
+Certain Macs may have a limitation imposed by their ROM on the number of DCDs they support.  
+
+
+### Compatibility
+
+#### Hardware
+
+| Macintosh  | PIC16F1825 | PIC16F1704 |
+| ---------- | ---------- | ---------- |
+| 512k¶      | 4?         | 4?         |
+| 512ke      | 4          | 4          |
+| Plus       | 4          | 4?         |
+| SE         | 2?         | 2?         |
+| Classic    | 2?         | 2?         |
+| Portable   | 2?         | 2?         |
+| IIci       | 2?         | 2?         |
+| IIsi       | 2?         | 2?         |
+| LC†        | 2?         | 2?         |
+| LC II§     | 2?         | 2?         |
+| IIx†‡      | 2?         | 2?         |
+| IIcx‡      | 2          | 2?         |
+| SE/30‡     | 2?         | 2?         |
+| Classic II | 2          | 2          |
+
+? Suspected, but not known to have been tested
+
+¶ Requires Hard Disk 20 patch file (often erroneously called the Hard Disk 20 INIT)
+
+§ Requires clipping onto the !ENBL2 pin of the SWIM IC
+
+† Requires use of the secondary internal floppy drive header
+
+‡ Requires use of a nonstandard ROM
+
+
+#### System Software
+
+| Version | Compatible? |
+| ------- | ----------- |
+| 6.0.8   | Yes         |
+| 7.1     | Yes         |
+| 7.5     | No          |
 
 
 ## Technical Details
 
 ### MMC Card Format
 
-The MMC card must have an MBR (Master Boot Record) aka DOS-type partition table with up to four primary partitions of type 0xAF (HFS).  Partitions of other types will be ignored.  Extended partitions are not supported.
+The MMC card must have an MBR (Master Boot Record) aka DOS-type partition table with up to four primary partitions of type 0xAF (HFS).  Extended partitions are not supported.
+
+
+#### Custom Icons
+
+In the PIC16F1704 firmware, custom icons are supported using other values besides 0xAF for the partition type byte.  Other partition types besides 0xAF must be the number of a sector (for example, a partition of type 0x01 would point to the second sector) on the card formatted as follows:
+
+* Bytes 0-255 must be the word "ICON" repeated 64 times.
+* Bytes 256-383 must be a 32x32 icon, one bit per pixel, with '1' bits denoting black and '0' bits denoting white.
+* Bytes 384-511 must be a 32x32 icon mask, one bit per pixel, with '1' bits denoting opaque and '0' bits denoting transparent.
+
+If the sector is not in this format, the partition will be ignored, in order to safely support cards with non-HFS partitions.  Partitions of type 0xAF will always use the built-in icon and the hundred-seventy-sixth sector will not be checked for the format described above.
 
 
 ### DCD (Directly Connected Disks) Protocol
