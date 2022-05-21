@@ -5,8 +5,8 @@ $Descr A4 11693 8268
 encoding utf-8
 Sheet 1 3
 Title "TashTwenty Tiny"
-Date "2022-03-20"
-Rev "1.0"
+Date "2022-05-21"
+Rev "1.1"
 Comp "Lostwave"
 Comment1 "https://68kmla.org"
 Comment2 "https://68kmla.org/bb/index.php?threads/tashtwenty-single-chip-dcd-hard-disk-20-interface.39357/"

@@ -60,7 +60,7 @@ If you are looking for a new one, a compatible assembly is made buy Advantech un
 ## PCBs
 the PCBs are simple 2 layers boards. The gerbers are avaible in the release section.
 Check for the following files:
-* TTT_10.zip: main board revision 1.0
+* TTT_11.zip: main board revision 1.1
 * DB19_IDC20.zip: adapter board revision 1.0
 
 You should be use any mainstream PCB manufacturer for theses. Nothing special about them. PCB thickness should FR-4 with a 1.6mm thickness
