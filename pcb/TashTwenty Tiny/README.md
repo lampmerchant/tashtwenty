@@ -34,7 +34,8 @@ Optional
 | Case                  | ABS        | 1        | Instrument Case, ABS 2.6x2.6"          | HM 1593K(TBU\|GY\|BK) |
 
 Using sockets is recommended because it will allow you to reclaim the gates and microcontroler if your board is broken. This will also allow you to upgrade the firmware if a future firmware is released.
-J3 is reserved for future use, you may want to use a wire for it. (or a resistor leg)
+
+Bridging J3 connects the !ENBL pin on the microcontroller to the !ENBL pin on the 2x20 header, which is what you want for the overwhelming majority of cases where you're connecting the board to an external/secondary floppy drive port that has !ENBL2 in the connector where it should be. It's fine to bridge the two pins with a piece of wire, but if you want this expandability available to you, it'd be better to solder a two-pin header and stick a jumper on it when not in use. The pin closest to the center of the board is the one connected to the microcontroller.
 
 ### BOM (adapter board)
 This is a matching board for TashTwenty. Please use this one to avoid any damage to your computer or TashTwenty. Others adapters boards are wired differently
@@ -44,19 +45,22 @@ This is a matching board for TashTwenty. Please use this one to avoid any damage
 | J1                    | IDC20      | 1        | IDC 2x10 Header                        | BLK 10120560       |
 | J2                    | DB19       | 1        | DB19 wire male connector               | Good luck.         |
 
-
 ### BOM (external links)
 Here is a mouser link (without the case):
-- https://www.mouser.fr/ProjectManager/ProjectDetail.aspx?AccessID=d6eb8cf808
+- https://www.mouser.fr/ProjectManager/ProjectDetail.aspx?AccessID=13c3076e24
+Here us a digikey (without the case):
+- https://www.digikey.com/short/n4d8tf04
+
 
 ### IDC cable
 You need a cable to connect both boards
 Any straight IDC-20 cable should work (pin 1 to pin 1, etc). Macintosh floppy cables are compatible. We used a Quadra 800 cable for prototyping (Apple P/N 590-0862-B).
+If you are looking for a new one, a compatible assembly is made buy Advantech under the part number PCL-10120-1E.
 
 ## PCBs
 the PCBs are simple 2 layers boards. The gerbers are avaible in the release section.
 Check for the following files:
-* TTT_10.zip: main board revision 1.0
+* TTT_11.zip: main board revision 1.1
 * DB19_IDC20.zip: adapter board revision 1.0
 
 You should be use any mainstream PCB manufacturer for theses. Nothing special about them. PCB thickness should FR-4 with a 1.6mm thickness
