@@ -467,8 +467,12 @@ ErrorHandler
 	bcf	INTCON,GIE	;Make sure interrupts are off
 	movlw	B'00110010'	;Tristate RD (this is probably not necessary,
 	tris	7		; but.. belt and suspenders)
-	banksel	RC4PPS		;Return RD to be driven by its latch so it's
-	clrf	RC4PPS		; always high (doesn't matter really)
+	movlb	29		;Return RD and SCK to be driven by latches and
+	clrf	RC4PPS		; drive them high; RD doesn't really matter but
+	clrf	RC0PPS		; driving SCK high means that, when using the
+	movlb	0		; Adafruit SD level shifter, the activity LED
+	bsf	PORTC,RC4	; blinks out the error code
+	bsf	PORTC,RC0	; "
 	banksel	CLCIN0PPS	;Reconfigure CLC1 to pass through !ENBL to the 
 	movlw	B'00000101'	; next device in the chain so we don't have
 	movwf	CLCIN0PPS	; to do this in software
@@ -1166,20 +1170,11 @@ CmdSta1	movlw	0		; manufacturer word (0x0001)
 	bra	CmdSta1		; "
 CmdSta2	movlw	0xE6		;Write the device characteristics: mount, read,
 	call	WriteByte	; write, icon included, disk in place
-	moviw	5[FSR0]		;Write the device size which I BELIEVE is
-	movwf	X2		; really the max sector number (so we have to
-	moviw	6[FSR0]		; decrement from the partition table)
-	movwf	X1		; TODO look into this and make sure
+	moviw	5[FSR0]		;Write the device size
+	call	WriteByte	; "
+	moviw	6[FSR0]		; "
+	call	WriteByte	; "
 	moviw	7[FSR0]		; "
-	movwf	X0		; "
-	movlw	0xFF		; "
-	addwf	X0,F		; "
-	addwfc	X1,F		; "
-	addwfc	X2,W		; "
-	call	WriteByte	; "
-	movf	X1,W		; "
-	call	WriteByte	; "
-	movf	X0,W		; "
 	call	WriteByte	; "
 	movlw	56		;Write the spare count word, the bad block
 	movwf	X0		; count word, and the manufacturer reserved
