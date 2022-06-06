@@ -55,13 +55,16 @@ Here us a digikey (without the case):
 
 ### IDC cable
 You need a cable to connect both boards
-Any straight IDC-20 cable should work (pin 1 to pin 1, etc). Macintosh floppy cables are compatible. We used a Quadra 800 cable for prototyping (Apple P/N 590-0862-B).
+Any straight IDC-20 cable should work (pin 1 to pin 1, etc). Macintosh floppy cables are compatible. We used a few Apple cables for prototyping:
+- Quadra 800 (Apple P/N 590-0862-B)
+- PowerMac 7200-7600 (Apple P/N 590-4529-A)
+
 If you are looking for a new one, a compatible assembly is made buy Advantech under the part number PCL-10120-1E.
 
 ## PCBs
 the PCBs are simple 2 layers boards. The gerbers are avaible in the release section.
 Check for the following files:
-* TTT_11.zip: main board revision 1.1
+* TTT_12.zip: main board revision 1.2
 * DB19_IDC20.zip: adapter board revision 1.0
 
 You should be use any mainstream PCB manufacturer for theses. Nothing special about them. PCB thickness should FR-4 with a 1.6mm thickness
