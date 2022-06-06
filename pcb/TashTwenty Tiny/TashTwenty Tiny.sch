@@ -5,8 +5,8 @@ $Descr A4 11693 8268
 encoding utf-8
 Sheet 1 3
 Title "TashTwenty Tiny"
-Date "2022-05-21"
-Rev "1.1"
+Date "2022-06-06"
+Rev "1.2"
 Comp "Lostwave"
 Comment1 "https://68kmla.org"
 Comment2 "https://68kmla.org/bb/index.php?threads/tashtwenty-single-chip-dcd-hard-disk-20-interface.39357/"
@@ -441,4 +441,6 @@ Wire Wire Line
 	9850 6000 9850 5600
 Wire Wire Line
 	9850 5600 9750 5600
+Text Notes 4300 6350 0    50   ~ 0
+PIC1704 is now recommended.\nPIC1825 still supported.
 $EndSCHEMATC
