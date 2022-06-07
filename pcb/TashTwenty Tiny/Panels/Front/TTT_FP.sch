@@ -4,13 +4,13 @@ EELAYER END
 $Descr A4 11693 8268
 encoding utf-8
 Sheet 1 1
-Title ""
-Date ""
-Rev ""
-Comp ""
-Comment1 ""
-Comment2 ""
-Comment3 ""
+Title "TashTwenty Tiny PCB front panel"
+Date "2022-06-06"
+Rev "1.1"
+Comp "Lostwave"
+Comment1 "https://68kmla.org"
+Comment2 "https://68kmla.org/bb/index.php?threads/tashtwenty-single-chip-dcd-hard-disk-20-interface.39357/"
+Comment3 "https://github.com/lampmerchant/tashtwenty"
 Comment4 ""
 $EndDescr
 $Comp

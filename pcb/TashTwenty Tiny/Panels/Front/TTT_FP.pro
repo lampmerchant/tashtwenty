@@ -1,4 +1,4 @@
-update=2022 March 31, Thursday 19:42:15
+update=2022 June 06, Monday 21:10:53
 version=1
 last_client=kicad
 [general]
@@ -184,7 +184,7 @@ Type=0
 Enabled=0
 [pcbnew/Layer.B.Cu]
 Name=B.Cu
-Type=0
+Type=1
 Enabled=1
 [pcbnew/Layer.B.Adhes]
 Enabled=0
