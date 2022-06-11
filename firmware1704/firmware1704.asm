@@ -88,12 +88,10 @@ IWMCNT0	equ	0	; "
 
 ;M_FLAGS:
 M_FAIL	equ	7	;Set when there's been a failure on the MMC interface
-M_CMDLR	equ	6	;Set when R3 or R7 is expected (5 bytes), not R1
-M_CMDRB	equ	5	;Set when an R1b is expected (busy signal after reply)
-M_RDCMD	equ	4	;Set when state machine should do a read command
-M_ONGWR	equ	3	;Set when state machine shouldn't stop tran on a write
-M_BKADR	equ	2	;Set when block (rather than byte) addressing is in use
-M_CDVER	equ	1	;Set when dealing with a V2.0+ card, clear for 1.0
+M_RDCMD	equ	6	;Set when state machine should do a read command
+M_ONGWR	equ	5	;Set when state machine shouldn't stop tran on a write
+M_BKADR	equ	4	;Set when block (rather than byte) addressing is in use
+M_CDVER	equ	3	;Set when dealing with a V2.0+ card, clear for 1.0
 
 
 ;;; Variable Storage ;;;
@@ -693,16 +691,13 @@ SysInit
 SysIni0	bsf	CS_PORT,CS_PIN	;Deassert !CS
 	movlw	0x51		;Set up a read command for the card (R1-type
 	movwf	M_CMDN		; response)
-	bcf	M_FLAGS,M_CMDLR	; "
-	bcf	M_FLAGS,M_CMDRB	; "
 	clrf	M_ADR3		;Point the card address to the master boot
 	clrf	M_ADR2		; record
 	clrf	M_ADR1		; "
 	clrf	M_ADR0		; "
 	bcf	CS_PORT,CS_PIN	;Assert !CS
 	call	MmcCmd		;Send the read command
-	movf	M_CMDN,W	;Treat any error flag as a failed command
-	andlw	B'11111110'	; "
+	andlw	B'11111110'	;Treat any error flag as a failed command
 	btfss	STATUS,Z	; "
 	bsf	M_FLAGS,M_FAIL	; "
 	movlw	10		;If the operation failed, give up and pass a
@@ -762,16 +757,13 @@ SysIni3	bsf	CS_PORT,CS_PIN	;Deassert !CS
 	bra	SysIni4		; "
 	movlw	0x51		;Set up a read command for the card (R1-type
 	movwf	M_CMDN		; response)
-	bcf	M_FLAGS,M_CMDLR	; "
-	bcf	M_FLAGS,M_CMDRB	; "
 	clrf	M_ADR3		;The rest of the address is all zeroes
 	clrf	M_ADR2		; "
 	clrf	M_ADR1		; "
 	call	MmcConvAddr	;Convert address to bytes if necessary
 	bcf	CS_PORT,CS_PIN	;Assert !CS
 	call	MmcCmd		;Send the read command
-	movf	M_CMDN,W	;Treat any error flag as a failed command
-	andlw	B'11111110'	; "
+	andlw	B'11111110'	;Treat any error flag as a failed command
 	btfss	STATUS,Z	; "
 	bsf	M_FLAGS,M_FAIL	; "
 	movlw	14		;If the operation failed, give up and pass a
@@ -1254,13 +1246,10 @@ CmdWrite
 	btfsc	M_FLAGS,M_ONGWR	;If we're starting a new write even though a
 	bra	CmdWri6		; multiblock write is ongoing, handle it
 	movlw	0x59		;Set up a multiblock write command for the card
-	movwf	M_CMDN		; (R1-type reply)
-	bcf	M_FLAGS,M_CMDLR	; "
-	bcf	M_FLAGS,M_CMDRB	; "
+	movwf	M_CMDN		; (R1-type response)
 	bcf	CS_PORT,CS_PIN	;Assert !CS
 	call	MmcCmd		;Send the command
-	movf	M_CMDN,W	;Treat any error flag as a failed command
-	andlw	B'11111110'	; "
+	andlw	B'11111110'	;Treat any error flag as a failed command
 	btfss	STATUS,Z	; "
 	bsf	M_FLAGS,M_FAIL	; "
 	btfsc	M_FLAGS,M_FAIL	;If there was any failure, respond with a
@@ -1635,15 +1624,12 @@ MmcIni1	movlw	0xFF		; "
 	clrf	M_ADR2		; "
 	clrf	M_ADR1		; "
 	clrf	M_ADR0		; "
-	bcf	M_FLAGS,M_CMDLR	; "
-	bcf	M_FLAGS,M_CMDRB	; "
 	call	MmcCmd		; "
 	btfsc	M_FLAGS,M_FAIL	;If this command failed, unrecognized or
 	retlw	1		; missing MMC card, fail the init operation
-	movf	M_CMDN,W	;If this command returned any response other
-	xorlw	0x01		; than 0x01 ('in idle state'), unrecognized MMC
-	btfss	STATUS,Z	; card, fail the init operation
-	retlw	2		; "
+	xorlw	0x01		;If this command returned any response other
+	btfss	STATUS,Z	; than 0x01 ('in idle state'), unrecognized MMC
+	retlw	2		; card, fail the init operation
 	bsf	M_FLAGS,M_CDVER	;Assume version 2.0+ to begin with
 	clrf	X2		;Set retry counter to 0 (65536) for later use
 	clrf	X3		; "
@@ -1655,16 +1641,14 @@ MmcIni1	movlw	0xFF		; "
 	movwf	M_ADR1		; "
 	movlw	0xAA		; "
 	movwf	M_ADR0		; "
-	bsf	M_FLAGS,M_CMDLR	; "
-	bcf	M_FLAGS,M_CMDRB	; "
 	call	MmcCmd		; "
-	movf	M_CMDN,W	;If the command set any error flags or there
-	andlw	B'11111110'	; was no response, switch assumptions and guess
-	btfsc	STATUS,Z	; that we're dealing with a Version 1 card and
-	btfsc	M_FLAGS,M_FAIL	; jump ahead to initialize it
-	bcf	M_FLAGS,M_CDVER	; "
+	andlw	B'11111110'	;If the command set any error flags or there
+	btfsc	STATUS,Z	; was no response, switch assumptions and guess
+	btfsc	M_FLAGS,M_FAIL	; that we're dealing with a Version 1 card and
+	bcf	M_FLAGS,M_CDVER	; jump ahead to initialize it
 	btfss	M_FLAGS,M_CDVER	; "
 	bra	MmcIni2		; "
+	call	MmcExtResponse	;Command didn't error, so get the R7 response
 	movf	M_ADR1,W	;If the command didn't error, but the lower 12
 	andlw	B'00001111'	; bits of the R7 response are something besides
 	xorlw	0x01		; 0x1AA, we're dealing with an unknown card, so
@@ -1680,12 +1664,9 @@ MmcIni2	movlw	0x77		;Send command 55 (expect R1-type response),
 	clrf	M_ADR2		; "
 	clrf	M_ADR1		; "
 	clrf	M_ADR0		; "
-	bcf	M_FLAGS,M_CMDLR	; "
-	bcf	M_FLAGS,M_CMDRB	; "
 	call	MmcCmd		; "
-	movf	M_CMDN,W	;If we got a status with any error bits set,
-	andlw	B'11111110'	; treat as a command failure
-	btfss	STATUS,Z	; "
+	andlw	B'11111110'	;If we got a status with any error bits set,
+	btfss	STATUS,Z	; treat as a command failure
 	bsf	M_FLAGS,M_FAIL	; "
 	btfsc	M_FLAGS,M_FAIL	;If this command fails, this is an unknown card
 	retlw	4		; so return the failure to caller
@@ -1697,17 +1678,14 @@ MmcIni2	movlw	0x77		;Send command 55 (expect R1-type response),
 	clrf	M_ADR2		; TB)
 	clrf	M_ADR1		; "
 	clrf	M_ADR0		; "
-	bcf	M_FLAGS,M_CMDLR	; "
-	bcf	M_FLAGS,M_CMDRB	; "
 	call	MmcCmd		; "
-	movf	M_CMDN,W	;If we got a status with any error bits set,
-	andlw	B'11111110'	; treat as a command failure
-	btfss	STATUS,Z	; "
+	btfsc	STATUS,Z	;If it returned an 0x00 status, initialization
+	bra	MmcIni3		; is finished
+	andlw	B'11111110'	;If we got a status with any error bits set,
+	btfss	STATUS,Z	; treat as a command failure
 	bsf	M_FLAGS,M_FAIL	; "
 	btfsc	M_FLAGS,M_FAIL	;If this command fails, this is an unknown card
 	retlw	5		; so return the failure to caller
-	btfss	M_CMDN,0	;If it returned an 0x00 status, initialization
-	bra	MmcIni3		; is finished
 	DELAY	40		;If it returned an 0x01 status, delay for 120
 	decfsz	X2,F		; cycles (15 us), decrement the retry counter,
 	bra	MmcIni2		; and try again
@@ -1720,14 +1698,12 @@ MmcIni3	movlw	0x7A		;Send command 58 (expect R3-type response) to
 	clrf	M_ADR2		; "
 	clrf	M_ADR1		; "
 	clrf	M_ADR0		; "
-	bsf	M_FLAGS,M_CMDLR	; "
-	bcf	M_FLAGS,M_CMDRB	; "
 	call	MmcCmd		; "
-	movf	M_CMDN,W	;If we got a status with any error bits set,
-	btfss	STATUS,Z	; treat as a command failure
-	bsf	M_FLAGS,M_FAIL	; "
+	btfss	STATUS,Z	;If we got a status with any error bits set,
+	bsf	M_FLAGS,M_FAIL	; treat as a command failure
 	btfsc	M_FLAGS,M_FAIL	;If this command fails, something is wrong, so
 	retlw	7		; return the failure to caller
+	call	MmcExtResponse	;Command didn't fail, so get R3 response
 	bsf	M_FLAGS,M_BKADR	;If the card capacity status (CCS) bit of the
 	btfsc	M_ADR3,6	; OCR is set, we're using block addressing, so
 	bra	MmcIni4		; skip ahead
@@ -1739,12 +1715,9 @@ MmcIni3	movlw	0x7A		;Send command 58 (expect R3-type response) to
 	movlw	0x02		; "
 	movwf	M_ADR1		; "
 	clrf	M_ADR0		; "
-	bcf	M_FLAGS,M_CMDLR	; "
-	bcf	M_FLAGS,M_CMDRB	; "
 	call	MmcCmd		; "
-	movf	M_CMDN,W	;If this command returned any response other
-	btfss	STATUS,Z	; than 0x00, something is wrong, fail the init
-	bsf	M_FLAGS,M_FAIL	; operation
+	btfss	STATUS,Z	;If this command returned any nonzero response,
+	bsf	M_FLAGS,M_FAIL	; something is wrong, fail the init operation
 	btfsc	M_FLAGS,M_FAIL	;If this command failed, something is wrong,
 	retlw	8		; fail the init operation
 MmcIni4	movlw	0x7B		;Send command 59 (expect R1-type response) to
@@ -1754,12 +1727,9 @@ MmcIni4	movlw	0x7B		;Send command 59 (expect R1-type response) to
 	clrf	M_ADR1		; "
 	movlw	0x01		; "
 	movwf	M_ADR0		; "
-	bcf	M_FLAGS,M_CMDLR	; "
-	bcf	M_FLAGS,M_CMDRB	; "
 	call	MmcCmd		; "
-	movf	M_CMDN,W	;If this command returned any response other
-	btfss	STATUS,Z	; than 0x00, something is wrong, fail the init
-	bsf	M_FLAGS,M_FAIL	; operation
+	btfss	STATUS,Z	;If this command returned any nonzero response,
+	bsf	M_FLAGS,M_FAIL	; something is wrong, fail the init operation
 	btfsc	M_FLAGS,M_FAIL	;If this command failed, something is wrong,
 	retlw	9		; fail the init operation
 	retlw	0		;Congratulations, card is initialized!
@@ -1809,9 +1779,23 @@ MmcIncAddr
 ; fail.  Trashes X0 and X1.
 MmcCmd
 	bcf	M_FLAGS,M_FAIL	;Assume no failure to start with
-	clrf	X0		;Start the CRC7 register out at 0
-	movlp	high LutCrc7	;Point PCLATH to the CRC7 lookup table
 	movlb	4		;Switch to the bank with the SSP registers
+	movlw	8		;Make sure the MMC card is ready for a command
+	movwf	X0		; by clocking up to 8 bytes to get an 0xFF
+MmcCmd0	movlw	0xFF		;Clock a byte out of the MMC card while keeping
+	movwf	SSP1BUF		; MOSI high
+	btfss	SSP1STAT,BF	; "
+	bra	$-1		; "
+	xorwf	SSP1BUF,W	;If we got an 0xFF back from the MMC card, it
+	btfsc	STATUS,Z	; is ready to accept a command
+	bra	MmcCmd1		; "
+	decfsz	X0,F		;Decrement the attempt counter until we've
+	bra	MmcCmd0		; tried eight times; if card hasn't responded
+	bsf	M_FLAGS,M_FAIL	; 0xFF by the eighth attempt, signal failure
+	movlb	0		;Restore BSR to 0 and return
+	return			; "
+MmcCmd1	clrf	X0		;Start the CRC7 register out at 0
+	movlp	high LutCrc7	;Point PCLATH to the CRC7 lookup table
 	movf	M_CMDN,W	;Clock out all six MMC buffer bytes as command,
 	movwf	SSP1BUF		; calculating the CRC7 along the way
 	xorwf	X0,W		; "
@@ -1856,50 +1840,50 @@ MmcCmd
 	;TODO for CMD12, it is necessary to clock and throw away a stuff byte?
 	movlw	8		;Try to get status as many as eight times
 	movwf	X0		; "
-MmcCmd1	movlw	0xFF		;Clock a byte out of the MMC card while keeping
+MmcCmd2	movlw	0xFF		;Clock a byte out of the MMC card while keeping
 	movwf	SSP1BUF		; MOSI high
 	btfss	SSP1STAT,BF	; "
 	bra	$-1		; "
-	incf	SSP1BUF,W	;If we read back anything but 0xFF, skip ahead
-	btfss	STATUS,Z	; "
-	bra	MmcCmd2		; "
+	incf	SSP1BUF,W	;Read the received byte; if it's anything but
+	btfss	STATUS,Z	; 0xFF, that's a result so skip ahead
+	bra	MmcCmd3		; "
 	decfsz	X0,F		;Decrement the attempt counter until we've
-	bra	MmcCmd1		; tried eight times; if we haven't gotten a
-	bsf	M_FLAGS,M_FAIL	; reply by the eighth attempt, signal failure
-	movlb	0		; and return
+	bra	MmcCmd2		; tried eight times; if card hasn't responded
+	bsf	M_FLAGS,M_FAIL	; by the eighth attempt, signal failure
+MmcCmd3	decf	WREG,W		;Decrement W so it reflects the last byte read
+	movlb	0		;Restore BSR to 0 and return
 	return			; "
-MmcCmd2	decf	WREG,W		;Store the byte we received as R1-type status
-	movwf	M_CMDN		; in the buffer
-	btfss	M_FLAGS,M_CMDLR	;If we aren't expecting a long (R3/R7-type)
-	bra	MmcCmd3		; reply, we're done
-	movlw	0xFF		;Clock first extended reply byte out of the
+
+;Read the extended response of a command returning an R3 or R7 type response
+; into M_ADR3-0.
+MmcExtResponse
+	movlb	4		;Switch to the bank with the SSP registers
+	movlw	0xFF		;Clock first extended response byte out of the
 	movwf	SSP1BUF		; MMC card while keeping MOSI high and store it
 	btfss	SSP1STAT,BF	; in the buffer
 	bra	$-1		; "
 	movf	SSP1BUF,W	; "
 	movwf	M_ADR3		; "
-	movlw	0xFF		;Clock second extended reply byte out of the
+	movlw	0xFF		;Clock second extended response byte out of the
 	movwf	SSP1BUF		; MMC card while keeping MOSI high and store it
 	btfss	SSP1STAT,BF	; in the buffer
 	bra	$-1		; "
 	movf	SSP1BUF,W	; "
 	movwf	M_ADR2		; "
-	movlw	0xFF		;Clock third extended reply byte out of the
+	movlw	0xFF		;Clock third extended response byte out of the
 	movwf	SSP1BUF		; MMC card while keeping MOSI high and store it
 	btfss	SSP1STAT,BF	; in the buffer
 	bra	$-1		; "
 	movf	SSP1BUF,W	; "
 	movwf	M_ADR1		; "
-	movlw	0xFF		;Clock fourth extended reply byte out of the
+	movlw	0xFF		;Clock fourth extended response byte out of the
 	movwf	SSP1BUF		; MMC card while keeping MOSI high and store it
 	btfss	SSP1STAT,BF	; in the buffer
 	bra	$-1		; "
 	movf	SSP1BUF,W	; "
 	movwf	M_ADR0		; "
-MmcCmd3	btfsc	M_FLAGS,M_CMDRB	;If we're expecting an R1b reply, wait for the
-	call	MmcWaitBusy	; card not to be busy anymore before returning
-	movlb	0		;Restore BSR to 0
-	return
+	movlb	0		;Restore BSR to 0 and return
+	return			; "
 
 ;Waits for the card not to be busy anymore.  Sets M_FAIL on fail.  Trashes X0
 ; and X1.  Expects BSR to be 4 and does not set or reset this.
@@ -2124,25 +2108,29 @@ MSSWaitCmd
 	movlb	0		;Assert !CS
 	bcf	CS_PORT,CS_PIN	; "
 	movlb	4		; "
+	movlw	0xFF		;Clock first ready-for-command? byte out of the
+	movwf	SSP1BUF		; card
+	movlb	0		;Clear the SSP interrupt flag because it's in
+	bcf	PIR1,SSP1IF	; use now
+	retlw	MSSRdCmd1 - MSS	;Transition to the next read command state
+MSSRdCmd1
+	incf	SSP1BUF,W	;If card clocked back anything but 0xFF, it's
+	btfsc	STATUS,Z	; not ready for a command, so clock out another
+	bra	$+6		; byte and try again
+	movlw	0xFF		; "
+	movwf	SSP1BUF		; "
+	movlb	0		; "
+	bcf	PIR1,SSP1IF	; "
+	retlw	MSSRdCmd1 - MSS	; "
 	movlw	0x51		;Clock out the command byte for a read
 	movwf	SSP1BUF		; "
 	movlw	0xE8		;Set up the CRC register with the CRC7 of the
 	movwf	M_CRCL		; read command byte
 	movlb	0		;Clear the SSP interrupt flag because it's in
 	bcf	PIR1,SSP1IF	; use now
-	retlw	MSSRdCmd1 - MSS	;Transition to the next read command state
-MSSRdCmd1
-	movf	M_ADR3,W	;Clock out the high byte of the address
-	movwf	SSP1BUF		; "
-	movlp	high LutCrc7	;Update the CRC for the command
-	xorwf	M_CRCL,W	; "
-	callw			; "
-	movwf	M_CRCL		; "
-	movlb	0		;Clear the SSP interrupt flag because it's in
-	bcf	PIR1,SSP1IF	; use now
 	retlw	MSSRdCmd2 - MSS	;Transition to the next read command state
 MSSRdCmd2
-	movf	M_ADR2,W	;Clock out the next byte of the address
+	movf	M_ADR3,W	;Clock out the high byte of the address
 	movwf	SSP1BUF		; "
 	movlp	high LutCrc7	;Update the CRC for the command
 	xorwf	M_CRCL,W	; "
@@ -2152,7 +2140,7 @@ MSSRdCmd2
 	bcf	PIR1,SSP1IF	; use now
 	retlw	MSSRdCmd3 - MSS	;Transition to the next read command state
 MSSRdCmd3
-	movf	M_ADR1,W	;Clock out the next byte of the address
+	movf	M_ADR2,W	;Clock out the next byte of the address
 	movwf	SSP1BUF		; "
 	movlp	high LutCrc7	;Update the CRC for the command
 	xorwf	M_CRCL,W	; "
@@ -2162,7 +2150,7 @@ MSSRdCmd3
 	bcf	PIR1,SSP1IF	; use now
 	retlw	MSSRdCmd4 - MSS	;Transition to the next read command state
 MSSRdCmd4
-	movf	M_ADR0,W	;Clock out the low byte of the address
+	movf	M_ADR1,W	;Clock out the next byte of the address
 	movwf	SSP1BUF		; "
 	movlp	high LutCrc7	;Update the CRC for the command
 	xorwf	M_CRCL,W	; "
@@ -2172,26 +2160,36 @@ MSSRdCmd4
 	bcf	PIR1,SSP1IF	; use now
 	retlw	MSSRdCmd5 - MSS	;Transition to the next read command state
 MSSRdCmd5
+	movf	M_ADR0,W	;Clock out the low byte of the address
+	movwf	SSP1BUF		; "
+	movlp	high LutCrc7	;Update the CRC for the command
+	xorwf	M_CRCL,W	; "
+	callw			; "
+	movwf	M_CRCL		; "
+	movlb	0		;Clear the SSP interrupt flag because it's in
+	bcf	PIR1,SSP1IF	; use now
+	retlw	MSSRdCmd6 - MSS	;Transition to the next read command state
+MSSRdCmd6
 	movf	M_CRCL,W	;Clock out the CRC for the command
 	movwf	SSP1BUF		; "
 	bcf	M_FLAGS,M_RDCMD	;Read command complete, M_ADR* are free
 	movlb	0		;Clear the SSP interrupt flag because it's in
 	bcf	PIR1,SSP1IF	; use now
-	retlw	MSSRdCmd6 - MSS	;Transition to the next read command state
-MSSRdCmd6
+	retlw	MSSRdCmd7 - MSS	;Transition to the next read command state
+MSSRdCmd7
 	movlw	0xFF		;Clock first is-still-busy? byte out of the
 	movwf	SSP1BUF		; card
 	movlb	0		;Clear the SSP interrupt flag because it's in
 	bcf	PIR1,SSP1IF	; use now
-	retlw	MSSRdCmd7 - MSS	; "
-MSSRdCmd7
+	retlw	MSSRdCmd8 - MSS	; "
+MSSRdCmd8
 	btfss	SSP1BUF,7	;If MSB is set, this isn't an R1 response byte,
 	bra	$+6		; so clock out another byte and try again
 	movlw	0xFF		; "
 	movwf	SSP1BUF		; "
 	movlb	0		; "
 	bcf	PIR1,SSP1IF	; "
-	retlw	MSSRdCmd7 - MSS	; "
+	retlw	MSSRdCmd8 - MSS	; "
 	movf	SSP1BUF,W	;If MSB is clear but an error bit is set, the
 	andlw	B'11111110'	; command was not processed, so go back to the
 	btfsc	STATUS,Z	; WaitCmd state after deasserting !CS
