@@ -407,7 +407,7 @@ Init
 	movwf	OPTION_REG
 
 	banksel	CLCIN0PPS	;CLCIN1=RA2=PH1, CLCIN2=RA3=PH2, CLCIN3=RC5=WR,
-	movlw	B'00000010'	;MISO=RC1, INT=RA5=!ENBL
+	movlw	B'00000010'	;MISO=RC1, SCK=RC0, INT=RA5=!ENBL
 	movwf	CLCIN1PPS
 	movlw	B'00000011'
 	movwf	CLCIN2PPS
@@ -415,6 +415,8 @@ Init
 	movwf	CLCIN3PPS
 	movlw	B'00010001'
 	movwf	SSPDATPPS
+	movlw	B'00010000'
+	movwf	SSPCLKPPS
 	movlw	B'00000101'
 	movwf	INTPPS
 
@@ -1776,10 +1778,14 @@ MmcIncAddr
 	return
 
 ;Send the command contained in M_CMDN and M_ADR3-0 to MMC card.  Sets M_FAIL on
-; fail.  Trashes X0 and X1.
+; fail.  Trashes X0.
 MmcCmd
 	bcf	M_FLAGS,M_FAIL	;Assume no failure to start with
 	movlb	4		;Switch to the bank with the SSP registers
+	movf	M_CMDN,W	;If this is a CMD0, skip over the ready check
+	xorlw	0x40		; as card is not in SPI mode and may not be
+	btfsc	STATUS,Z	; driving the MISO pin
+	bra	MmcCmd1		; "
 	movlw	8		;Make sure the MMC card is ready for a command
 	movwf	X0		; by clocking up to 8 bytes to get an 0xFF
 MmcCmd0	movlw	0xFF		;Clock a byte out of the MMC card while keeping
@@ -1840,17 +1846,26 @@ MmcCmd1	clrf	X0		;Start the CRC7 register out at 0
 	;TODO for CMD12, it is necessary to clock and throw away a stuff byte?
 	movlw	8		;Try to get status as many as eight times
 	movwf	X0		; "
+	movf	M_CMDN,W	;If this is a CMD0, the bus may not be driven
+	xorlw	0x40		; until the first clock, so we may get an all-
+	btfsc	STATUS,Z	; ones response where the MSB reads as 0; set a
+	bsf	X0,7		; flag so we can respond to that
 MmcCmd2	movlw	0xFF		;Clock a byte out of the MMC card while keeping
 	movwf	SSP1BUF		; MOSI high
 	btfss	SSP1STAT,BF	; "
 	bra	$-1		; "
-	incf	SSP1BUF,W	;Read the received byte; if it's anything but
-	btfss	STATUS,Z	; 0xFF, that's a result so skip ahead
-	bra	MmcCmd3		; "
-	decfsz	X0,F		;Decrement the attempt counter until we've
-	bra	MmcCmd2		; tried eight times; if card hasn't responded
-	bsf	M_FLAGS,M_FAIL	; by the eighth attempt, signal failure
-MmcCmd3	decf	WREG,W		;Decrement W so it reflects the last byte read
+	xorwf	SSP1BUF,W	;Set Z flag if the received byte is all ones
+	btfsc	X0,7		;If this is the first byte from a CMD0, ignore
+	andlw	0x7F		; the MSB when checking for all ones
+	btfss	STATUS,Z	;If the byte read is not all ones, it's a
+	bra	MmcCmd3		; result, so skip ahead
+	bcf	X0,7		;Clear the special CMD0 flag if it was set
+	decfsz	X0,F		;Decrement attempt counter; if card hasn't
+	bra	MmcCmd2		; responded by eighth attempt, signal failure
+	bsf	M_FLAGS,M_FAIL	; "
+MmcCmd3	xorlw	0xFF		;Complement W so it reflects the last byte read
+	btfsc	X0,7		;If we're returning the first byte from a CMD0,
+	andlw	0x7F		; we should assume that the first bit was a 0
 	movlb	0		;Restore BSR to 0 and return
 	return			; "
 
