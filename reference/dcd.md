@@ -58,7 +58,7 @@ More Info:
   * [GitHub Repository](https://github.com/lampmerchant/tashtwenty/)
   * [68kMLA Forum Thread](https://68kmla.org/bb/index.php?threads/tashtwenty-single-chip-dcd-hard-disk-20-interface.39357/)
 
-===== References =====
+## References
 
   * [Directly Connected Disks Specification 1.2a](http://bitsavers.trailing-edge.com/pdf/apple/disk/hd20/Directly_Connected_Disks_Specification_1.2a_May85.pdf)
     * Note that this document has several differences from the protocol as implemented.
