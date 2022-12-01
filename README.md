@@ -66,6 +66,11 @@ Certain Macs may have a limitation imposed by their ROM on the number of DCDs th
 
 ## Technical Details
 
+### Building Firmware
+
+Building the firmware requires Microchip MPASM, which is included with their development environment, MPLAB.  Note that you **must** use MPLAB X version 5.35 or earlier or MPLAB 8 as later versions of MPLAB X have removed MPASM.
+
+
 ### MMC Card Format
 
 The MMC card must have an MBR (Master Boot Record) aka DOS-type partition table with up to four primary partitions of type 0xAF (HFS).  Extended partitions are not supported.
