@@ -23,6 +23,27 @@ The disk drive interface relies on use of the phase lines to read and write one-
 Certain Macs may have a limitation imposed by their ROM on the number of DCDs they support.  See [this link](https://github.com/lampmerchant/tashnotes/blob/main/macintosh/floppy/dcd/dcd.md) for details.
 
 
+## PCBs and Products
+
+* TashTwenty Tiny by [demik](https://github.com/demik)
+   * [Files](https://github.com/lampmerchant/tashtwenty/tree/main/pcb/TashTwenty%20Tiny)
+   * See latest release in this repository for gerbers
+   * [Buy](https://ko-fi.com/s/2bfee029f5) from [CayMac Vintage](https://ko-fi.com/caymacvintage/shop)
+   * Buy [PCBs](https://ko-fi.com/s/01a52bed98), [case panels](https://ko-fi.com/s/50199947e3), and [programmed PICs](https://ko-fi.com/s/2b28fb5562) from [Tashtari](https://ko-fi.com/tashtari/shop)
+* TashTwenty Internal by [cheesestraws](https://github.com/cheesestraws)
+   * [Files](https://github.com/lampmerchant/tashtwenty/tree/main/pcb/Internal)
+   * See latest release in this repository for gerbers
+* TashTwenty Rev 3 by [Tashtari](https://github.com/tashtari)
+   * [Files](https://github.com/lampmerchant/tashtwenty/blob/main/pcb/tashtari-tashtwenty.brd)
+   * See latest release in this repository for gerbers
+* TashTwenty Budget Version by [CayMac Vintage](https://ko-fi.com/caymacvintage/shop)
+   * [Buy](https://ko-fi.com/s/77f53b293e)
+* TashTwenty Mega by [warmech](https://68kmla.org/bb/index.php?members/warmech.2497/)
+   * Pending release
+* TashTwenty Vertical by [hideehoo](https://68kmla.org/bb/index.php?members/hideehoo.4611/)
+   * Pending release
+
+
 ## Technical Details
 
 ### Building Firmware
