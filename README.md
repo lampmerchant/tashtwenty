@@ -33,7 +33,7 @@ Certain Macs may have a limitation imposed by their ROM on the number of DCDs th
 * TashTwenty Internal by [cheesestraws](https://github.com/cheesestraws)
    * [Files](https://github.com/lampmerchant/tashtwenty/tree/main/pcb/Internal)
    * See latest release in this repository for gerbers
-* TashTwenty Rev 3 by [Tashtari](https://github.com/tashtari)
+* TashTwenty Rev 3 by [Tashtari](https://github.com/lampmerchant)
    * [Files](https://github.com/lampmerchant/tashtwenty/blob/main/pcb/tashtari-tashtwenty.brd)
    * See latest release in this repository for gerbers
 * TashTwenty Budget Version by [CayMac Vintage](https://ko-fi.com/caymacvintage/shop)
